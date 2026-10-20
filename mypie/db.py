@@ -131,6 +131,13 @@ class Database:
                 (account, ts(), price, equity),
             )
 
+    def trades(self, mode: str, market: str | None = None, since: str = "") -> list[dict]:
+        """한 계좌(모의/실거래)의 매매 기록 (오래된 것 → 최신)."""
+        if market:
+            return self._rows("SELECT * FROM trades WHERE mode = ? AND market = ? AND ts >= ? ORDER BY id",
+                              (mode, market, since))
+        return self._rows("SELECT * FROM trades WHERE mode = ? AND ts >= ? ORDER BY id", (mode, since))
+
     def recent_trades(self, limit: int = 30) -> list[dict]:
         return self._rows("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,))
 

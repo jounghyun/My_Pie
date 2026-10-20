@@ -1,11 +1,14 @@
 """업비트 API 키 관리. 키는 파이의 ~/My_Pie/.env 에만 저장되고 GitHub에는 올라가지 않는다.
 
 키 등록/변경 (파이에서): python3 -m mypie.keys
+키 상태·만료일 확인:      python3 -m mypie.keys --check
 """
 
+import argparse
 import getpass
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .config import ROOT
@@ -36,7 +39,34 @@ def save_keys(access: str, secret: str, path: Path = ENV_PATH) -> None:
     os.chmod(path, 0o600)
 
 
+def days_left(expire_at: str) -> int:
+    """만료까지 남은 날 수."""
+    expires = datetime.fromisoformat(expire_at)
+    return (expires - datetime.now(expires.tzinfo)).days
+
+
+def check() -> None:
+    from .upbit import UpbitClient, UpbitError
+
+    keys = load_keys()
+    if not keys:
+        sys.exit("등록된 키가 없어요. python3 -m mypie.keys 로 등록하세요.")
+    try:
+        expire_at = UpbitClient(*keys).key_expiry()
+    except UpbitError as e:
+        sys.exit(f"업비트 연결 실패: {e}")
+    if not expire_at:
+        sys.exit("키는 연결되지만 만료일을 찾지 못했어요. 업비트 Open API 관리에서 확인하세요.")
+    print(f"키 연결 정상 · 만료 {expire_at[:10]} (앞으로 {days_left(expire_at)}일)")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="업비트 API 키 등록/확인")
+    parser.add_argument("--check", action="store_true", help="등록된 키가 되는지와 만료일만 확인")
+    if parser.parse_args().check:
+        check()
+        return
+
     from .upbit import UpbitClient, UpbitError
 
     print("업비트 Open API 키를 등록해요. 붙여넣어도 화면에는 안 보여요.")

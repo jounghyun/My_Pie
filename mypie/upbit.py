@@ -19,19 +19,31 @@ USER_AGENT = "My_Pie/0.2"
 
 
 class UpbitError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None, name: str | None = None):
+        super().__init__(message)
+        self.status = status   # HTTP 상태 코드
+        self.name = name       # 업비트 오류 이름 (예: insufficient_funds, order_not_found)
 
 
 class OrderNotPlaced(UpbitError):
-    """주문을 넣기 전에 실패함 (예: 잔고 조회 통신 오류). 주문이 안 들어갔으니 나중에 다시 시도해도 안전하다."""
+    """주문을 넣기 전에 실패함 (예: 잔고 조회 통신 오류). 아무것도 안 바뀌었으니 다시 시도해도 안전하다."""
 
 
-def _read_error(e: urllib.error.HTTPError) -> str:
+class OrderRejected(UpbitError):
+    """업비트가 주문을 거절함 (예: 잔고 부족). 아무것도 안 바뀌었다."""
+
+
+class OrderUnknown(UpbitError):
+    """주문이 들어갔는지 모름 (예: 주문 중 통신 끊김). 다음 루프에서 주문 번호로 확인해서 장부를 맞춘다."""
+
+
+def _read_error(e: urllib.error.HTTPError) -> tuple[str, str]:
+    """(오류 이름, 메시지)."""
     try:
         err = json.loads(e.read().decode("utf-8")).get("error", {})
-        return f"{err.get('name', '')}: {err.get('message', '')}".strip(": ")
+        return err.get("name", ""), err.get("message", "")
     except Exception:
-        return ""
+        return "", ""
 
 
 def _get(path: str, params: dict, timeout: float = 5, retries: int = 3, headers: dict | None = None):
@@ -47,7 +59,9 @@ def _get(path: str, params: dict, timeout: float = 5, retries: int = 3, headers:
             last_error = f"HTTP {e.code}"
             # 429(요청 과다)와 5xx는 잠시 후 재시도, 나머지 4xx는 요청 자체가 잘못된 것
             if 400 <= e.code < 500 and e.code != 429:
-                raise UpbitError(f"{path} 요청 거부 (HTTP {e.code}) {_read_error(e)}") from e
+                name, message = _read_error(e)
+                raise UpbitError(f"{path} 요청 거부 (HTTP {e.code}) {name} {message}".strip(),
+                                 status=e.code, name=name) from e
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             last_error = str(getattr(e, "reason", e))
         time.sleep(0.5 * (attempt + 1))
@@ -60,6 +74,27 @@ def get_price(market: str) -> float:
     """현재가."""
     data = _get("/ticker", {"markets": market})
     return float(data[0]["trade_price"])
+
+
+def get_tickers(markets: list[str]) -> list[dict]:
+    """여러 종목의 시세 요약 (화면용). 24시간 등락률은 전일 종가(09시) 기준."""
+    if not markets:
+        return []
+    return [
+        {
+            "market": t["market"],
+            "price": float(t["trade_price"]),
+            "open": float(t["opening_price"]),
+            "high": float(t["high_price"]),
+            "low": float(t["low_price"]),
+            "prev_close": float(t["prev_closing_price"]),
+            "change_rate": float(t["signed_change_rate"]),
+            "value_24h": float(t.get("acc_trade_price_24h") or 0),
+            "high_52w": float(t.get("highest_52_week_price") or 0),
+            "low_52w": float(t.get("lowest_52_week_price") or 0),
+        }
+        for t in _get("/ticker", {"markets": ",".join(markets)})
+    ]
 
 
 def get_daily_candles(market: str, count: int = 200, to: str | None = None) -> list[dict]:
@@ -135,8 +170,17 @@ class UpbitClient:
                 return float(a["balance"])
         return 0.0
 
-    def get_order(self, order_uuid: str) -> dict:
-        return self._private_get("/order", {"uuid": order_uuid})
+    def key_expiry(self) -> str | None:
+        """지금 쓰는 키의 만료 시각 (업비트 키는 발급 후 1년, 연장 불가)."""
+        for k in self._private_get("/api_keys"):
+            if k.get("access_key") == self.access_key:
+                return k.get("expire_at")
+        return None
+
+    def get_order(self, order_uuid: str | None = None, identifier: str | None = None) -> dict:
+        """주문 조회. uuid(업비트 주문 번호) 또는 identifier(우리가 붙인 번호)로 찾는다."""
+        params = {"uuid": order_uuid} if order_uuid else {"identifier": identifier}
+        return self._private_get("/order", params)
 
     def place_order(self, params: dict) -> dict:
         """주문. 같은 주문이 두 번 들어가지 않도록 절대 자동 재시도하지 않는다."""
@@ -149,9 +193,12 @@ class UpbitClient:
             with urllib.request.urlopen(request, timeout=10) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            raise UpbitError(f"주문 거부 (HTTP {e.code}) {_read_error(e)}") from e
+            name, message = _read_error(e)
+            if e.code >= 500:  # 서버 오류: 주문이 들어갔는지 알 수 없다
+                raise OrderUnknown(f"주문 중 업비트 서버 오류 (HTTP {e.code})", status=e.code, name=name) from e
+            raise OrderRejected(f"주문 거절 (HTTP {e.code}) {name} {message}".strip(), status=e.code, name=name) from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise UpbitError(f"주문 요청 중 통신 오류 ({getattr(e, 'reason', e)}) · 주문이 들어갔는지 업비트에서 확인하세요") from e
+            raise OrderUnknown(f"주문 중 통신 오류 ({getattr(e, 'reason', e)})") from e
 
     def wait_order(self, order_uuid: str, timeout: float = 15) -> dict:
         """주문이 체결 완료(done) 또는 종료(cancel)될 때까지 기다린다. 시장가 주문은 보통 바로 끝난다."""
