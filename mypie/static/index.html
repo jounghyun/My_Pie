@@ -207,6 +207,7 @@
   .steps b { color: var(--text); }
   code { background: var(--soft); padding: 1px 6px; border-radius: 6px; font-size: 13px; }
   .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .tg-open { display: block; text-align: center; padding: 14px; border-radius: 12px; background: #229ed9; color: #fff; font-weight: 700; text-decoration: none; margin: 0 0 14px; font-size: 16px; }
   .toggle input { width: 18px; height: 18px; }
   button.small { min-height: 30px; padding: 3px 10px; font-size: 12.5px; }
   .tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
@@ -402,6 +403,7 @@
   <!-- 텔레그램 -->
   <section class="card" id="telegram">
     <h2><span class="ico">✈️</span>텔레그램 <small>웹페이지 로그인 코드 · 매매 알림</small><span class="right chip" id="tgChip">-</span></h2>
+    <a id="tgOpen" class="tg-open" target="_blank" rel="noopener" hidden></a>
     <div id="tgOff">
       <ol class="steps">
         <li>텔레그램 앱에서 <b>@BotFather</b>를 찾아 <code>/newbot</code>을 보내요. 봇 이름과 아이디(끝이 <code>bot</code>)를 정하면 <b>봇 토큰</b>을 줘요.</li>
@@ -1122,6 +1124,9 @@ function renderTelegram(d) {
   $('tgOn').hidden = !t.connected;
   $('tgChip').textContent = t.connected ? `✅ @${t.bot || '내 봇'} 연결됨` : (t.linking ? `⏳ @${t.linking} 에게 메시지 기다리는 중` : '연결 안 됨');
   if (t.linking && !S.tgPolling) pollLink(Date.now());  // 새로고침해도 기다리던 연결을 이어서 확인
+  const open = $('tgOpen');  // 봇은 먼저 말을 걸 수 없어서, 내가 봇 대화창에서 [시작]을 한 번 눌러야 한다
+  open.hidden = !t.linking || t.connected;
+  if (t.linking) { open.href = `https://t.me/${t.linking}`; open.textContent = `📲 텔레그램에서 @${t.linking} 열고 [시작] 누르기`; }
   if (t.connected && document.activeElement !== $('tgNotify') && document.activeElement !== $('tgLogin')) {
     $('tgNotify').checked = t.notify; $('tgLogin').checked = t.login;
   }
