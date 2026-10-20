@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My_Pie 모니터링</title>
+<style>
+  :root {
+    --bg: #f3f4f6; --card: #ffffff; --text: #17191d; --muted: #6b7280; --line: #e6e8eb;
+    --up: #d62f43; --down: #1d63d8; --ok: #13a35a; --warn: #b7791f; --bad: #d62f43;
+    --chip: #eceef1; --paper-bg: #fff3d4; --paper-fg: #8a5a00; --live-bg: #fde2e4; --live-fg: #b4232f;
+    --accent: #17191d; --accent-fg: #ffffff; --active: #f2f6ff; --active-line: #1d63d8;
+    --danger-bg: #fff1f2; --danger-line: #f3b4bb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1014; --card: #171a20; --text: #e7e9ec; --muted: #9aa1ab; --line: #272b33;
+      --up: #ff5c6c; --down: #4f8fff; --ok: #3ad07f; --warn: #e3a64a; --bad: #ff5c6c;
+      --chip: #22262e; --paper-bg: #3a2f12; --paper-fg: #f3c565; --live-bg: #3d1a1e; --live-fg: #ff8d98;
+      --accent: #e7e9ec; --accent-fg: #0e1014; --active: #1a2233; --active-line: #4f8fff;
+      --danger-bg: #2a1417; --danger-line: #5c2a31;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0 4px 0 0; letter-spacing: -0.02em; }
+  .chip { background: var(--chip); color: var(--muted); border-radius: 999px; padding: 2px 10px; font-size: 13px; font-weight: 600; }
+  .chip.paper { background: var(--paper-bg); color: var(--paper-fg); }
+  .chip.live { background: var(--live-bg); color: var(--live-fg); }
+  .beat { margin-left: auto; display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--ok); animation: pulse 2s infinite; }
+  .dot.bad { background: var(--bad); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; min-width: 0; }
+  .label { font-size: 13px; color: var(--muted); }
+  .value { font-size: clamp(17px, 4.4vw, 22px); font-weight: 700; letter-spacing: -0.02em; margin-top: 2px;
+           font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { font-size: 13px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums;
+         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .up { color: var(--up) !important; } .down { color: var(--down) !important; }
+
+  section.card { margin-top: 12px; }
+  h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+  h2 small { font-weight: 400; color: var(--muted); font-size: 13px; }
+
+  .halt { background: var(--danger-bg); border-color: var(--danger-line); margin: 0 0 12px; }
+  .halt h2 { color: var(--bad); }
+
+  .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
+  .state { font-size: 17px; font-weight: 700; }
+  .kv { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .kv b { color: var(--text); font-weight: 600; }
+  .desc { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+
+  .form { display: grid; grid-template-columns: 90px 1fr; gap: 10px 12px; align-items: center; }
+  @media (max-width: 560px) { .form { grid-template-columns: 1fr; gap: 4px; } .form .field-label { margin-top: 8px; } }
+  .field-label { font-size: 13px; color: var(--muted); }
+  .field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+  select, input[type=password], input[type=number], button {
+    font: inherit; border-radius: 10px; border: 1px solid var(--line); padding: 9px 12px;
+    background: var(--card); color: var(--text); min-height: 42px;
+  }
+  .field select { flex: 1 1 260px; min-width: 0; }
+  input[type=number] { width: 150px; }
+  input[type=password] { width: 120px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+  button:disabled, input:disabled, select:disabled { opacity: .45; cursor: not-allowed; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; min-width: 96px; }
+  .seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .hint { font-size: 13px; color: var(--muted); }
+  .check { font-size: 14px; display: flex; gap: 8px; align-items: center; color: var(--bad); font-weight: 600; }
+  .check input { width: 18px; height: 18px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .msg { font-size: 14px; margin: 8px 0 0; min-height: 1.5em; }
+  .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); } .msg.info { color: var(--muted); }
+  .guide-now { font-size: 13px; color: var(--muted); background: var(--bg); border-radius: 10px; padding: 10px 12px; margin: 0; }
+  .guide-now b { color: var(--text); }
+
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  th { font-weight: 500; color: var(--muted); font-size: 13px; }
+  th, td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  .left { text-align: left; }
+  .side { font-weight: 700; }
+  .live-tag { font-size: 11px; font-weight: 700; color: var(--live-fg); background: var(--live-bg); border-radius: 6px; padding: 0 5px; margin-left: 4px; }
+  #ranks tr { cursor: pointer; }
+  #ranks tr:hover td { background: var(--bg); }
+  #ranks tr.active td { background: var(--active); }
+  #ranks tr.active td:first-child { box-shadow: inset 3px 0 0 var(--active-line); }
+  .rank { font-weight: 700; width: 2.5em; }
+  .tag { font-size: 11px; font-weight: 700; color: var(--active-line); margin-left: 6px; }
+  .note { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+
+  details { border-top: 1px solid var(--line); padding: 10px 0; }
+  details:first-of-type { border-top: 0; }
+  summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+  summary span { font-weight: 400; color: var(--muted); }
+  details p { margin: 8px 0 0; font-size: 14px; color: var(--muted); }
+
+  .chart { position: relative; height: 180px; }
+  .chart svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .chart .axis { position: absolute; right: 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; background: var(--card); padding: 0 2px; }
+  .chart .axis.top { top: -2px; } .chart .axis.bottom { bottom: -2px; }
+  .chart-foot { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  .two { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; }
+  @media (max-width: 900px) { .two { grid-template-columns: 1fr; } }
+  ul.events { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
+  ul.events li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; display: grid; grid-template-columns: auto 1fr; gap: 10px; }
+  ul.events li:last-child { border-bottom: 0; }
+  ul.events time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 2px; }
+  ul.events .warning { color: var(--warn); } ul.events .error { color: var(--bad); }
+  .empty { color: var(--muted); font-size: 14px; padding: 12px 0; }
+  footer { margin-top: 20px; text-align: center; color: var(--muted); font-size: 12px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>My_Pie</h1>
+    <span class="chip" id="modeChip">-</span>
+    <span class="chip" id="marketChip">-</span>
+    <span class="chip" id="strategyChip">-</span>
+    <div class="beat"><span class="dot" id="dot"></span><span id="beat">불러오는 중…</span></div>
+  </header>
+
+  <section class="card halt" id="haltCard" hidden>
+    <h2>⚠️ 실거래 매매를 멈췄어요</h2>
+    <p class="desc" id="haltReason" style="margin-top:0"></p>
+    <p class="desc">업비트 앱에서 주문·잔고가 이상 없는지 확인한 뒤 다시 시작하세요.</p>
+    <div class="field" style="margin-top:10px">
+      <input id="haltPin" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off" maxlength="32" aria-label="PIN">
+      <button class="primary" id="resume" type="button">다시 시작</button>
+    </div>
+    <p class="msg" id="haltMsg"></p>
+  </section>
+
+  <div class="grid">
+    <div class="card"><div class="label">현재가</div><div class="value" id="price">-</div><div class="sub" id="day">-</div></div>
+    <div class="card"><div class="label" id="planLabel">오늘 계획</div><div class="value" id="planValue">-</div><div class="sub" id="planSub">-</div></div>
+    <div class="card"><div class="label">총 자산</div><div class="value" id="equity">-</div><div class="sub" id="initial">-</div></div>
+    <div class="card"><div class="label">수익률</div><div class="value" id="ret">-</div><div class="sub" id="pnl">-</div></div>
+  </div>
+
+  <section class="card">
+    <h2>현재 상태</h2>
+    <div class="row">
+      <span class="state" id="state">-</span>
+      <span class="kv" id="stateText"></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span class="kv"><span id="krwLabel">원화</span> <b id="krw">-</b></span>
+      <span class="kv"><span id="coinLabel">코인</span> <b id="coin">-</b></span>
+      <span class="kv" id="holdInfo"></span>
+    </div>
+    <div class="row" style="margin-top:6px" id="exchangeRow" hidden>
+      <span class="kv">업비트 실제 잔고 · 원화 <b id="exKrw">-</b> · <span id="exCoinLabel"></span> <b id="exCoin">-</b></span>
+    </div>
+    <p class="desc" id="planNote"></p>
+  </section>
+
+  <section class="card">
+    <h2>설정 <small>종목 · 계좌 · 전략</small></h2>
+    <div class="form">
+      <div class="field-label">종목</div>
+      <div class="field"><select id="market" aria-label="종목"></select></div>
+
+      <div class="field-label">계좌</div>
+      <div class="field">
+        <div class="seg" role="group" aria-label="계좌">
+          <button type="button" id="modePaper" aria-pressed="true">모의투자</button>
+          <button type="button" id="modeLive" aria-pressed="false">실거래</button>
+        </div>
+        <span class="hint" id="keyState"></span>
+      </div>
+
+      <div class="field-label" id="budgetLabel">투자 한도</div>
+      <div class="field" id="budgetField">
+        <input id="budget" type="number" min="5000" step="10000" inputmode="numeric" aria-label="투자 한도">
+        <span class="hint">원 · 봇은 이 금액 안에서만 사고팔아요. 업비트에 원래 있던 돈과 코인은 건드리지 않아요.</span>
+      </div>
+
+      <div class="field-label">전략</div>
+      <div class="field"><select id="pick" aria-label="전략"></select></div>
+    </div>
+    <p class="guide-now" id="pickGuide" style="margin-top:10px"></p>
+    <label class="check" id="confirmRow" hidden style="margin-top:10px">
+      <input type="checkbox" id="confirmLive"> 실제 돈으로 주문이 나간다는 걸 이해했어요
+    </label>
+    <div class="actions">
+      <input id="pin" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off" maxlength="32" aria-label="PIN">
+      <button class="primary" id="apply" type="button">설정 적용</button>
+      <button id="reset" type="button">되돌리기</button>
+    </div>
+    <p class="msg" id="msg"></p>
+  </section>
+
+  <section class="card">
+    <h2>전략 순위 <small id="rankPeriod">과거 데이터로 백테스트</small></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th class="left">순위</th><th class="left">전략</th><th>수익률</th><th>최대 낙폭</th><th>승률</th><th>매매</th><th>추이</th></tr></thead>
+        <tbody id="ranks"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="ranksEmpty">순위를 계산하는 중이에요. 처음엔 과거 데이터를 받느라 1~2분 걸려요.</div>
+    <p class="note">줄을 누르면 위 설정의 전략으로 골라져요 · ⚠️ "과거에 이렇게 했다면?"을 계산한 결과라 앞으로도 같다는 보장은 없어요 · 수수료 0.05% 반영 · 최대 낙폭 = 고점에서 가장 많이 떨어졌던 비율</p>
+  </section>
+
+  <section class="card">
+    <h2>전략 설명 <small>눌러서 펼쳐 보세요</small></h2>
+    <div id="guides"></div>
+  </section>
+
+  <section class="card">
+    <h2>자산 추이 <small id="chartTitle">최근 7일 · 5분 간격</small></h2>
+    <div class="chart" id="chart"><div class="empty">데이터를 모으는 중이에요</div></div>
+    <div class="chart-foot"><span id="chartFrom"></span><span id="chartTo"></span></div>
+  </section>
+
+  <div class="two">
+    <section class="card">
+      <h2>매매 기록 <small>최근 30건</small></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th class="left">시간</th><th class="left">구분</th><th>가격</th><th>수량</th><th>금액</th><th>손익</th></tr></thead>
+          <tbody id="trades"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="tradesEmpty">아직 매매 기록이 없어요</div>
+    </section>
+    <section class="card">
+      <h2>이벤트</h2>
+      <ul class="events" id="events"></ul>
+    </section>
+  </div>
+
+  <footer>5초마다 자동으로 새로고침돼요</footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const won = (n) => n == null ? '-' : Math.round(n).toLocaleString('ko-KR') + '원';
+const signedWon = (n) => n == null ? '-' : (n > 0 ? '+' : '') + won(n);
+const pct = (n, digits = 2) => n == null ? '-' : (n > 0 ? '+' : '') + n.toFixed(digits) + '%';
+const qty = (n) => n == null ? '-' : n.toFixed(8);
+const parseTs = (s) => new Date(s.replace(' ', 'T') + '+09:00');
+const shortTs = (s) => s.slice(5, 16);
+function tone(el, n) {
+  el.classList.remove('up', 'down');
+  if (n > 0) el.classList.add('up'); else if (n < 0) el.classList.add('down');
+}
+function ago(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + '초 전';
+  if (sec < 3600) return Math.floor(sec / 60) + '분 전';
+  return Math.floor(sec / 3600) + '시간 전';
+}
+function setBeat(kind, text) {
+  $('dot').className = 'dot ' + kind;
+  $('beat').textContent = text;
+}
+function cell(tr, text, cls) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (cls) td.className = cls;
+  tr.appendChild(td);
+  return td;
+}
+function setMsg(id, text, kind) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = 'msg ' + (kind || '');
+}
+
+let last = null;        // 마지막으로 받은 데이터
+let formSig = '';       // 설정 폼을 서버 값으로 다시 채워야 하는지 판단
+let formDirty = false;  // 사용자가 폼을 고치는 중이면 새로고침 때 덮어쓰지 않는다
+let formMode = 'paper';
+let userMsg = false;    // 사용자 동작으로 띄운 안내는 자동 안내로 덮지 않는다
+
+function render(d) {
+  last = d;
+  renderForm(d);
+  renderRanking(d);
+  renderGuides(d);
+  const s = d.status;
+  $('haltCard').hidden = !(s && s.halted);
+  if (!s) { setBeat('bad', '봇이 아직 시작되지 않았어요'); return; }
+  if (s.halted) $('haltReason').textContent = `${s.halted.at} · ${s.halted.reason}`;
+
+  const age = (parseTs(d.server_time) - parseTs(s.updated_at)) / 1000;
+  const alive = age <= Math.max(60, (s.interval_sec || 10) * 6);
+  setBeat(alive ? 'ok' : 'bad', (alive ? '정상 작동 중 · ' : '봇 응답 없음 · ') + ago(age));
+
+  const live = s.mode === 'live';
+  $('modeChip').textContent = live ? '실거래' : '모의투자';
+  $('modeChip').className = 'chip ' + (live ? 'live' : 'paper');
+  $('marketChip').textContent = marketLabel(d, s.market);
+  $('strategyChip').textContent = s.strategy.label;
+
+  const a = s.account;
+  $('price').textContent = won(s.price);
+  $('day').textContent = `거래일 ${s.day}`;
+  const [planLabel, planValue, planSub] = planCard(s);
+  $('planLabel').textContent = planLabel;
+  $('planValue').textContent = planValue;
+  $('planSub').textContent = planSub;
+  $('planSub').title = planSub;
+  $('equity').textContent = won(a.equity);
+  $('initial').textContent = live ? `한도 ${won(a.initial_krw)}로 시작` : `시작 ${won(a.initial_krw)}`;
+  $('ret').textContent = pct(a.return_pct);
+  tone($('ret'), a.return_pct);
+  $('pnl').textContent = signedWon(a.equity - a.initial_krw);
+  tone($('pnl'), a.equity - a.initial_krw);
+
+  $('state').textContent = s.holding ? `${s.coin} 보유 중` : '매수 대기 중';
+  $('state').className = 'state' + (s.holding ? ' up' : '');
+  $('stateText').textContent = s.state_text;
+  $('krwLabel').textContent = live ? '봇 원화' : '원화';
+  $('krw').textContent = won(a.krw);
+  $('coinLabel').textContent = (live ? '봇 ' : '') + s.coin;
+  $('coin').textContent = qty(a.coin);
+  $('holdInfo').textContent = '';
+  if (s.holding) {
+    const value = a.coin * s.price, gain = value - a.cost;
+    const g = document.createElement('b');
+    g.textContent = `${signedWon(gain)} (${pct(gain / a.cost * 100)})`;
+    tone(g, gain);
+    $('holdInfo').append(`평균 ${won(a.avg_price)} · 평가 ${won(value)} · `, g);
+  }
+  $('exchangeRow').hidden = !(live && s.exchange);
+  if (live && s.exchange) {
+    $('exKrw').textContent = won(s.exchange.krw);
+    $('exCoinLabel').textContent = s.coin;
+    $('exCoin').textContent = qty(s.exchange.coin);
+  }
+  $('planNote').textContent = `${s.strategy.label}: ${s.strategy.description}` + (s.plan.note ? ` · 오늘: ${s.plan.note}` : '');
+  $('chartTitle').textContent = `${live ? '실거래' : '모의투자'} · 최근 7일 · 5분 간격`;
+
+  renderTrades(d.trades);
+  renderEvents(d.events);
+  renderChart(d.equity, a.initial_krw);
+}
+
+function planCard(s) {
+  const p = s.plan || {}, price = s.price;
+  if (s.holding && s.strategy.exit_next_open) return ['매도 예정', '내일 09시', p.note || ''];
+  if (s.holding && p.sell_stop != null)
+    return ['매도 기준가', won(p.sell_stop), `현재가보다 ${((price - p.sell_stop) / price * 100).toFixed(2)}% 아래`];
+  if (!s.holding && p.buy_stop != null) {
+    const diff = (p.buy_stop - price) / price * 100;
+    return ['매수 목표가', won(p.buy_stop), diff > 0 ? `돌파까지 ${diff.toFixed(2)}% 남음` : '목표가 돌파함'];
+  }
+  return ['오늘 신호', s.holding ? '보유 유지' : '관망', p.note || '-'];
+}
+
+// ---- 설정 폼 ----
+
+function marketLabel(d, market) {
+  const m = (d.markets || []).find(x => x.market === market);
+  return m ? `${m.name} ${market.replace('KRW-', '')}` : market;
+}
+
+function rankedList(d) {
+  // 순위가 현재 종목 기준으로 있으면 순위대로, 없으면 전략 목록 순서대로
+  if (d.ranking && d.status && d.ranking.market === d.status.market) return d.ranking.results;
+  return d.strategies.map(x => ({ ...x, rank: null }));
+}
+
+function fillForm(d) {
+  const s = d.status;
+  const cur = s ? s.settings : { market: 'KRW-BTC', mode: 'paper', budget: 100000 };
+  const marketSel = $('market');
+  marketSel.innerHTML = '';
+  const list = (d.markets || []).slice();
+  if (!list.some(m => m.market === cur.market)) list.unshift({ market: cur.market, name: cur.market });
+  for (const m of list) {
+    const opt = document.createElement('option');
+    opt.value = m.market;
+    opt.textContent = `${m.name} (${m.market.replace('KRW-', '')})` + (m.market === cur.market ? '  ✓ 지금' : '');
+    marketSel.appendChild(opt);
+  }
+  marketSel.value = cur.market;
+
+  const pick = $('pick');
+  pick.innerHTML = '';
+  for (const r of rankedList(d)) {
+    const opt = document.createElement('option');
+    opt.value = r.name;
+    opt.textContent = (r.rank ? `${r.rank}위 · ` : '') + r.label +
+      (r.total_return != null ? ` (${pct(r.total_return * 100, 1)})` : '') +
+      (s && r.name === s.strategy.name ? '  ✓ 지금' : '');
+    pick.appendChild(opt);
+  }
+  if (s) pick.value = s.strategy.name;
+
+  formMode = cur.mode;
+  $('budget').value = Math.round(cur.budget);
+  $('confirmLive').checked = false;
+}
+
+function renderForm(d) {
+  const s = d.status;
+  const sig = JSON.stringify([s && s.settings, s && s.strategy.name, d.ranking && d.ranking.computed_at, (d.markets || []).length]);
+  if (sig !== formSig && !formDirty) { fillForm(d); formSig = sig; }
+
+  $('keyState').textContent = d.live_ready ? '✅ 업비트 키 연결됨' : '🔑 키 없음 · 파이에서 python3 -m mypie.keys';
+  $('budget').min = d.limits.min_budget;
+  $('budget').max = d.limits.max_budget;
+  updateFormView();
+
+  const ready = d.pin_set && s;
+  for (const id of ['pin', 'apply']) $(id).disabled = !ready;
+  if (d.pending) { setMsg('msg', '설정을 바꾸는 중이에요…', 'info'); userMsg = false; }
+  else if (!d.pin_set && !userMsg) setMsg('msg', '설정을 바꾸려면 PIN이 필요해요. 파이에서 python3 -m mypie.pin 을 실행해서 만들어 주세요.', 'info');
+  else if (!userMsg) setMsg('msg', '', '');
+}
+
+function updateFormView() {
+  const d = last, s = d && d.status;
+  $('modePaper').setAttribute('aria-pressed', formMode === 'paper');
+  $('modeLive').setAttribute('aria-pressed', formMode === 'live');
+  $('modeLive').disabled = !(d && d.live_ready);
+  const live = formMode === 'live';
+  $('budgetLabel').hidden = $('budgetField').hidden = !live;
+  $('confirmRow').hidden = !(live && (!s || s.settings.mode !== 'live'));
+  const chosen = d ? rankedList(d).find(r => r.name === $('pick').value) : null;
+  $('pickGuide').innerHTML = '';
+  if (chosen) {
+    const b = document.createElement('b');
+    b.textContent = chosen.label + ' · ';
+    $('pickGuide').append(b, chosen.guide || chosen.description);
+  }
+}
+
+function touch() { formDirty = true; updateFormView(); }
+$('market').addEventListener('change', touch);
+$('pick').addEventListener('change', touch);
+$('budget').addEventListener('input', touch);
+$('modePaper').addEventListener('click', () => { formMode = 'paper'; touch(); });
+$('modeLive').addEventListener('click', () => { formMode = 'live'; touch(); });
+$('reset').addEventListener('click', () => {
+  formDirty = false; formSig = ''; userMsg = false;
+  if (last) render(last);
+});
+
+$('apply').addEventListener('click', async () => {
+  const d = last, s = d && d.status;
+  if (!s) return;
+  const cur = s.settings;
+  const body = {
+    market: $('market').value, mode: formMode, budget: Number($('budget').value),
+    strategy: $('pick').value, pin: $('pin').value, confirm_live: $('confirmLive').checked,
+  };
+  const changed = body.market !== cur.market || body.mode !== cur.mode || body.strategy !== s.strategy.name ||
+                  (body.mode === 'live' && body.budget !== Math.round(cur.budget));
+  userMsg = true;
+  if (!changed) { setMsg('msg', '바뀐 설정이 없어요.', 'info'); return; }
+  if (!body.pin) { setMsg('msg', 'PIN을 입력해 주세요.', 'bad'); $('pin').focus(); return; }
+  if (body.mode === 'live' && cur.mode !== 'live' && !body.confirm_live) {
+    setMsg('msg', "실거래로 바꾸려면 '실제 돈으로 주문이 나간다'에 체크해 주세요.", 'bad'); return;
+  }
+  const label = rankedList(d).find(r => r.name === body.strategy).label;
+  const lines = [
+    `종목: ${marketLabel(d, body.market)}`,
+    `계좌: ${body.mode === 'live' ? `실거래 (한도 ${won(body.budget)})` : '모의투자'}`,
+    `전략: ${label}`,
+  ];
+  if (s.holding) lines.push('', `지금 보유 중인 ${s.coin}은(는) 바로 매도돼요.`);
+  if (body.mode === 'live') lines.push('', '⚠️ 실제 돈으로 업비트에 주문이 나가요.');
+  if (!confirm('이렇게 바꿀까요?\n\n' + lines.join('\n'))) return;
+
+  $('apply').disabled = true;
+  try {
+    const res = await fetch('/api/control', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    setMsg('msg', data.message, data.ok ? 'ok' : 'bad');
+    if (data.ok) { $('pin').value = ''; formDirty = false; formSig = ''; refresh(); }
+  } catch (e) {
+    setMsg('msg', '요청을 보내지 못했어요. 파이 연결을 확인해 주세요.', 'bad');
+  } finally {
+    $('apply').disabled = false;
+  }
+});
+
+$('resume').addEventListener('click', async () => {
+  if (!$('haltPin').value) { setMsg('haltMsg', 'PIN을 입력해 주세요.', 'bad'); return; }
+  try {
+    const res = await fetch('/api/resume', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: $('haltPin').value }),
+    });
+    const data = await res.json();
+    setMsg('haltMsg', data.message, data.ok ? 'ok' : 'bad');
+    if (data.ok) { $('haltPin').value = ''; refresh(); }
+  } catch (e) {
+    setMsg('haltMsg', '요청을 보내지 못했어요.', 'bad');
+  }
+});
+
+// ---- 전략 순위 · 설명 ----
+
+function renderRanking(d) {
+  const body = $('ranks');
+  body.innerHTML = '';
+  const rk = d.ranking;
+  const s = d.status;
+  const usable = rk && (!s || rk.market === s.market);
+  $('ranksEmpty').style.display = usable ? 'none' : 'block';
+  if (!usable) return;
+  const basis = rk.rank_by === 'calmar' ? '위험 대비 수익 순' : '총수익률 순';
+  $('rankPeriod').textContent = `${marketLabel(d, rk.market)} · ${rk.from} ~ ${rk.to} (${rk.days}일) · ${basis}`;
+  const active = s ? s.strategy.name : null;
+  for (const r of rk.results) {
+    const tr = document.createElement('tr');
+    tr.title = r.guide || r.description;
+    if (r.name === active) tr.className = 'active';
+    cell(tr, r.rank + '위', 'left rank');
+    const name = cell(tr, r.label, 'left');
+    if (r.name === active) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = '사용 중';
+      name.appendChild(tag);
+    }
+    tone(cell(tr, pct(r.total_return * 100, 1)), r.total_return);
+    cell(tr, pct(r.mdd * 100, 1), r.mdd < 0 ? 'down' : '');
+    cell(tr, r.win_rate == null ? '-' : Math.round(r.win_rate * 100) + '%');
+    cell(tr, r.trades + '회');
+    cell(tr, '').appendChild(spark(r.curve));
+    tr.onclick = () => { $('pick').value = r.name; touch(); $('pick').scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+    body.appendChild(tr);
+  }
+}
+
+let guidesDone = false;
+function renderGuides(d) {
+  if (guidesDone) return;
+  const box = $('guides');
+  for (const g of d.strategies) {
+    const det = document.createElement('details');
+    const sum = document.createElement('summary');
+    const desc = document.createElement('span');
+    desc.textContent = ' · ' + g.description;
+    sum.append(g.label, desc);
+    const p = document.createElement('p');
+    p.textContent = g.guide;
+    det.append(sum, p);
+    box.appendChild(det);
+  }
+  guidesDone = true;
+}
+
+function spark(curve) {
+  const W = 90, H = 24, ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  if (!curve || curve.length < 2) return svg;
+  const lo = Math.min(...curve, 1), hi = Math.max(...curve, 1), span = hi - lo || 1;
+  const pts = curve.map((v, i) => `${(i / (curve.length - 1) * W).toFixed(1)},${(2 + (hi - v) / span * (H - 4)).toFixed(1)}`);
+  const base = document.createElementNS(ns, 'line');
+  const y1 = 2 + (hi - 1) / span * (H - 4);
+  Object.entries({ x1: 0, x2: W, y1, y2: y1, stroke: 'var(--muted)', 'stroke-dasharray': '2 2', 'stroke-width': 1, opacity: .5 })
+    .forEach(([k, v]) => base.setAttribute(k, v));
+  const line = document.createElementNS(ns, 'polyline');
+  line.setAttribute('points', pts.join(' '));
+  line.setAttribute('fill', 'none');
+  line.setAttribute('stroke-width', '1.5');
+  line.setAttribute('stroke', curve[curve.length - 1] >= 1 ? 'var(--up)' : 'var(--down)');
+  svg.append(base, line);
+  return svg;
+}
+
+// ---- 기록 ----
+
+function renderTrades(trades) {
+  const body = $('trades');
+  body.innerHTML = '';
+  $('tradesEmpty').style.display = trades.length ? 'none' : 'block';
+  for (const t of trades) {
+    const tr = document.createElement('tr');
+    tr.title = `${t.market} · ${t.reason || ''}`;
+    const isBuy = t.side === 'buy';
+    cell(tr, shortTs(t.ts), 'left');
+    const side = cell(tr, isBuy ? '매수' : '매도', 'left side ' + (isBuy ? 'up' : 'down'));
+    if (t.mode === 'live') {
+      const tag = document.createElement('span');
+      tag.className = 'live-tag';
+      tag.textContent = '실전';
+      side.appendChild(tag);
+    }
+    cell(tr, won(t.price));
+    cell(tr, qty(t.volume));
+    cell(tr, won(t.krw));
+    const p = cell(tr, t.profit == null ? '' : signedWon(t.profit));
+    if (t.profit != null) tone(p, t.profit);
+    body.appendChild(tr);
+  }
+}
+
+function renderEvents(events) {
+  const list = $('events');
+  list.innerHTML = '';
+  if (!events.length) { list.innerHTML = '<li class="empty">이벤트가 없어요</li>'; return; }
+  for (const e of events) {
+    const li = document.createElement('li');
+    const time = document.createElement('time');
+    time.textContent = shortTs(e.ts);
+    const msg = document.createElement('span');
+    msg.textContent = e.message;
+    msg.className = e.level;
+    li.append(time, msg);
+    list.appendChild(li);
+  }
+}
+
+function renderChart(points, initial) {
+  const box = $('chart');
+  if (points.length < 2) {
+    box.innerHTML = '<div class="empty">데이터를 모으는 중이에요 (5분마다 한 점씩 쌓여요)</div>';
+    $('chartFrom').textContent = $('chartTo').textContent = '';
+    return;
+  }
+  const W = 1000, H = 180, pad = 8;
+  const values = points.map(p => p.equity).concat(initial);
+  let lo = Math.min(...values), hi = Math.max(...values);
+  const minSpan = initial * 0.002;  // 변화가 거의 없을 때 그래프가 확대돼 보이지 않게 최소 ±0.1% 범위
+  if (hi - lo < minSpan) { const mid = (hi + lo) / 2; hi = mid + minSpan / 2; lo = mid - minSpan / 2; }
+  const x = (i) => i / (points.length - 1) * W;
+  const y = (v) => pad + (hi - v) / (hi - lo) * (H - pad * 2);
+  const line = points.map((p, i) => `${x(i).toFixed(1)},${y(p.equity).toFixed(1)}`).join(' ');
+  const end = points[points.length - 1].equity;
+  const color = end > initial ? 'var(--up)' : end < initial ? 'var(--down)' : 'var(--muted)';
+  box.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="자산 추이">
+      <line x1="0" x2="${W}" y1="${y(initial)}" y2="${y(initial)}" stroke="var(--muted)" stroke-dasharray="4 4"
+            stroke-width="1" vector-effect="non-scaling-stroke" opacity=".6"/>
+      <polygon points="0,${H} ${line} ${W},${H}" fill="${color}" opacity=".08"/>
+      <polyline points="${line}" fill="none" stroke="${color}" stroke-width="2"
+                vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+    </svg>
+    <span class="axis top">${won(hi)}</span><span class="axis bottom">${won(lo)}</span>`;
+  $('chartFrom').textContent = shortTs(points[0].ts);
+  $('chartTo').textContent = shortTs(points[points.length - 1].ts);
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    render(await res.json());
+  } catch (e) {
+    setBeat('bad', '파이에 연결할 수 없어요');
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+[Unit]
+Description=My_Pie 자동매매 봇
+
+[Service]
+WorkingDirectory=%h/My_Pie
+ExecStart=/usr/bin/python3 -m mypie.bot
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
