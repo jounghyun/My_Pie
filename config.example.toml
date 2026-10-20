@@ -31,6 +31,9 @@ rank_by = "return"        # return = 총수익률 순 / calmar = 최대 낙폭 �
 [web]
 host = "0.0.0.0"          # 같은 공유기 안의 PC/폰에서 접속 가능 (포트포워딩은 하지 마세요)
 port = 8000
+login = true              # 텔레그램이 연결돼 있으면 로그인 코드 요구 (웹페이지 텔레그램 카드에서도 끌 수 있음)
+code_digits = 6           # 로그인 코드 자릿수 (4~8). 짧을수록 찍어서 맞히기 쉬워요
+session_days = 30         # 한 번 로그인한 기기를 다시 묻지 않는 기간 (일)
 
 # 전략별 숫자를 바꾸고 싶으면 이렇게 (안 적으면 기본값)
 # [params.volatility_breakout]

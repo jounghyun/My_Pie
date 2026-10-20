@@ -14,7 +14,7 @@ DEFAULTS = {
     "live": {"budget": 100_000, "max_budget": 1_000_000},
     "backtest": {"days": 1095, "rank_by": "return"},
     "params": {},
-    "web": {"host": "0.0.0.0", "port": 8000},
+    "web": {"host": "0.0.0.0", "port": 8000, "login": True, "code_digits": 6, "session_days": 30},
 }
 
 

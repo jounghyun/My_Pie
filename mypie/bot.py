@@ -23,7 +23,7 @@ import time
 import uuid
 from dataclasses import asdict
 
-from . import backtest, network, upbit
+from . import backtest, network, telegram, upbit
 from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, sync_full
 from .config import load_config
 from .db import Database
@@ -101,6 +101,7 @@ class Bot:
         self.cfg = cfg
         self.db = db
         self.executor_factory = executor_factory or self._make_executor
+        self.notifier = telegram.Notifier()  # 텔레그램 알림 (연결돼 있고 알림을 켰을 때만 보낸다)
         self.interval = float(cfg["general"]["interval_sec"])
         self.fee_rate = float(cfg["paper"]["fee_rate"])
         self.max_budget = float(cfg["live"]["max_budget"])
@@ -193,9 +194,16 @@ class Bot:
     def _weights(self) -> dict:
         return {s.id: s.weight for s in self.slots}
 
-    def event(self, level: str, message: str) -> None:
+    def event(self, level: str, message: str, notify: bool = False) -> None:
         getattr(log, level)(message)
         self.db.add_event(level, message)
+        if notify or level == "error":
+            self._notify(message)
+
+    def _notify(self, message: str) -> None:
+        """텔레그램 알림. 웹페이지 텔레그램 카드에서 '매매 알림'을 끄면 보내지 않는다."""
+        if (self.db.get_state("telegram_settings") or {}).get("notify", True):
+            self.notifier(f"🥧 {message}")
 
     def _sstate(self, slot: Slot) -> dict:
         return (self.db.get_state("slot_state") or {}).get(slot.id, {})
@@ -304,8 +312,8 @@ class Bot:
         if not topup:  # 추가 매수는 '오늘 산 날'로 치지 않는다 (손절 규칙이 그대로 살아 있게)
             self._set_sstate(slot.id, last_buy_day=day)
         self.db.add_trade(self.executor.mode, slot.market, trade)
-        self.event("info", f"{self._tag(slot)}매수 {trade['volume']:.8g} @ {trade['price']:,.0f}원 "
-                           f"({trade['krw']:,.0f}원) · {reason}")
+        self.event("info", f"🔴 {self._tag(slot)}매수 {trade['volume']:.8g} @ {trade['price']:,.0f}원 "
+                           f"({trade['krw']:,.0f}원) · {reason}", notify=True)
         return True
 
     def _sell(self, slot: Slot, price: float, reason: str) -> bool:
@@ -319,8 +327,8 @@ class Bot:
         self.executor.clear_pending()
         self.db.add_trade(self.executor.mode, slot.market, trade)
         pct = trade["profit"] / trade["cost"] * 100 if trade.get("cost") else 0.0
-        self.event("info", f"{self._tag(slot)}매도 {trade['volume']:.8g} @ {trade['price']:,.0f}원 · "
-                           f"손익 {trade['profit']:+,.0f}원 ({pct:+.2f}%) · {reason}")
+        self.event("info", f"🔵 {self._tag(slot)}매도 {trade['volume']:.8g} @ {trade['price']:,.0f}원 · "
+                           f"손익 {trade['profit']:+,.0f}원 ({pct:+.2f}%) · {reason}", notify=True)
         return True
 
     def _recover(self) -> None:
@@ -341,9 +349,10 @@ class Bot:
             if pending["side"] == "bid" and pending.get("day"):
                 self._set_sstate(slot_id, last_buy_day=pending["day"])
             self.event("warning", f"[실거래] 끊기기 전에 낸 {market} {side} 주문이 체결돼 있어서 장부에 반영했어요 "
-                                  f"({trade['volume']:.8g} @ {trade['price']:,.0f}원)")
+                                  f"({trade['volume']:.8g} @ {trade['price']:,.0f}원)", notify=True)
         else:
-            self.event("info", f"[실거래] 끊기기 전 {market} {side} 주문은 들어가지 않았어요. 그대로 이어서 매매해요")
+            self.event("info", f"[실거래] 끊기기 전 {market} {side} 주문은 들어가지 않았어요. 그대로 이어서 매매해요",
+                       notify=True)
 
     def _sync(self, prices: dict) -> None:
         """계좌 전액 모드: 업비트 실제 잔고로 장부를 맞춘다 (원래 있던 코인, 입금·출금 반영)."""
@@ -360,7 +369,7 @@ class Bot:
         if flow:
             kind = "입금" if flow > 0 else "출금"
             self.event("info", f"[실거래] 계좌에 {kind}(또는 직접 매매)이 있었어요 · {flow:+,.0f}원 · "
-                               "비중대로 나눠 담고, 넣은 돈 합계에 반영해서 수익률이 틀어지지 않게 했어요")
+                               "비중대로 나눠 담고, 넣은 돈 합계에 반영해서 수익률이 틀어지지 않게 했어요", notify=True)
 
     # ---- 웹페이지 요청 ----
 
@@ -465,7 +474,7 @@ class Bot:
         self.last_exchange_check = 0.0
         self.last_snapshot = 0.0
         self.db.delete_state("control_request")
-        self.event("info", f"설정 변경 · {before} → {self._describe()}")
+        self.event("info", f"설정 변경 · {before} → {self._describe()}", notify=True)
 
     def _describe(self) -> str:
         budget = self.settings["budget"]
@@ -493,7 +502,7 @@ class Bot:
         ok_ip = net.get("upbit_ok_ip")
         if ok_ip and ip != ok_ip and net.get("ip") != ip and load_keys():
             self.event("warning", f"집 공인 IP가 바뀐 것 같아요 ({ok_ip} → {ip}). 업비트 Open API 관리에서 "
-                                  f"허용 IP를 {ip}(으)로 바꿔야 실거래 주문이 나가요")
+                                  f"허용 IP를 {ip}(으)로 바꿔야 실거래 주문이 나가요", notify=True)
         self.db.set_state("network", {**net, "ip": ip, "checked_at": ts()})
 
     def _mark_upbit_ok(self) -> None:
@@ -501,7 +510,7 @@ class Bot:
         net = self._network()
         if net.get("ip") and (net.get("upbit_ok_ip") != net["ip"] or net.get("ip_error")):
             if net.get("ip_error"):
-                self.event("info", "업비트 허용 IP 문제가 해결됐어요")
+                self.event("info", "업비트 허용 IP 문제가 해결됐어요", notify=True)
             self.db.set_state("network", {**net, "upbit_ok_ip": net["ip"], "ip_error": False})
 
     def _mark_ip_error(self) -> None:
@@ -629,7 +638,7 @@ class Bot:
         self.db.set_state("key_info", {"expire_at": expire_at, "checked": day})
         if expire_at and days_left(expire_at) <= 30:
             self.event("warning", f"업비트 API 키가 {expire_at[:10]}에 만료돼요 (앞으로 {days_left(expire_at)}일). "
-                                  "만료되면 실거래가 멈추니 새 키를 받아 python3 -m mypie.keys 로 등록하세요")
+                                  "만료되면 실거래가 멈추니 새 키를 받아 python3 -m mypie.keys 로 등록하세요", notify=True)
 
     def _update_rankings(self, day: str) -> None:
         """종목별 전략 순위. 포트폴리오 종목은 하루 한 번, 웹페이지에서 요청한 종목은 바로 (한 루프에 하나씩)."""
@@ -678,7 +687,7 @@ class Bot:
     # ---- 계속 실행 ----
 
     def run(self) -> None:
-        self.event("info", f"봇 시작 · {self._describe()}")
+        self.event("info", f"🥧 봇 시작 · {self._describe()}", notify=True)
         wait = self.interval
         while not self.stop_event.is_set():
             try:

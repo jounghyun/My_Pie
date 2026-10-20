@@ -32,6 +32,7 @@
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
+  [id] { scroll-margin-top: 120px; }  /* 위 메뉴로 이동할 때 고정된 상단바에 가리지 않게 */
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
@@ -200,6 +201,12 @@
   .sum-bar { height: 10px; border-radius: 5px; background: var(--soft); overflow: hidden; display: flex; }
   .sum-bar i { height: 100%; }
   .sum-text { display: flex; justify-content: space-between; font-size: 13px; margin-top: 6px; flex-wrap: wrap; gap: 6px; }
+  .steps { margin: 0 0 14px; padding-left: 20px; font-size: 14px; color: var(--muted); display: grid; gap: 4px; }
+  .steps b { color: var(--text); }
+  code { background: var(--soft); padding: 1px 6px; border-radius: 6px; font-size: 13px; }
+  .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .toggle input { width: 18px; height: 18px; }
+  button.small { min-height: 30px; padding: 3px 10px; font-size: 12.5px; }
   .tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .tools button { min-height: 36px; padding: 6px 12px; font-size: 13.5px; }
 
@@ -278,9 +285,10 @@
       <div class="top-right">
         <span class="num" id="clock"></span>
         <div class="beat"><span class="dot" id="dot"></span><span id="beat">불러오는 중…</span></div>
+        <button type="button" id="logout" class="ghost small" hidden>로그아웃</button>
       </div>
       <nav class="jump">
-        <a href="#overview">개요</a><a href="#portfolio">포트폴리오</a><a href="#chart">차트</a><a href="#settings">설정</a>
+        <a href="#overview">개요</a><a href="#portfolio">포트폴리오</a><a href="#chart">차트</a><a href="#settings">설정</a><a href="#telegram">텔레그램</a>
         <a href="#ranking">전략 순위</a><a href="#calendar">손익 캘린더</a><a href="#market">시장</a><a href="#history">기록</a><a href="#system">라즈베리파이</a>
       </nav>
     </div>
@@ -387,6 +395,36 @@
       <button id="reset" type="button">되돌리기</button>
     </div>
     <p class="msg" id="msg"></p>
+  </section>
+
+  <!-- 텔레그램 -->
+  <section class="card" id="telegram">
+    <h2><span class="ico">✈️</span>텔레그램 <small>웹페이지 로그인 코드 · 매매 알림</small><span class="right chip" id="tgChip">-</span></h2>
+    <div id="tgOff">
+      <ol class="steps">
+        <li>텔레그램 앱에서 <b>@BotFather</b>를 찾아 <code>/newbot</code>을 보내요. 봇 이름과 아이디(끝이 <code>bot</code>)를 정하면 <b>봇 토큰</b>을 줘요.</li>
+        <li>그 토큰을 아래에 붙여넣고 PIN을 넣은 뒤 <b>연결 시작</b>을 눌러요.</li>
+        <li>화면에 나오는 내 봇을 텔레그램에서 찾아 <b>아무 메시지나</b> 보내면 자동으로 연결돼요.</li>
+      </ol>
+      <div class="field">
+        <input id="tgToken" type="password" placeholder="봇 토큰 (123456789:ABC…)" autocomplete="off" style="flex:1 1 260px;width:auto">
+        <input id="tgPinA" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off">
+        <button class="primary" id="tgStart" type="button">연결 시작</button>
+      </div>
+    </div>
+    <div id="tgOn" hidden>
+      <div class="field" style="gap:8px 18px">
+        <label class="toggle"><input type="checkbox" id="tgNotify"> 🔔 매매 체결·오류 알림 받기</label>
+        <label class="toggle"><input type="checkbox" id="tgLogin"> 🔐 웹페이지에 들어올 때 로그인 코드 요구</label>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <input id="tgPinB" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off">
+        <button id="tgTest" type="button">테스트 메시지</button>
+        <button id="tgOffBtn" type="button" class="ghost">연결 끊기</button>
+      </div>
+      <p class="desc">스위치를 바꾸거나 버튼을 누르려면 PIN을 먼저 넣으세요. 로그인한 기기는 30일 동안 다시 묻지 않아요.</p>
+    </div>
+    <p class="msg" id="tgMsg"></p>
   </section>
 
   <!-- 전략 순위 -->
@@ -516,9 +554,15 @@ const SVG = 'http://www.w3.org/2000/svg';
 function svg(tag, attrs = {}) { const e = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; }
 function cell(tr, text, cls) { const td = el('td', { class: cls || '', text }); tr.appendChild(td); return td; }
 function setMsg(text, kind) { $('msg').textContent = text; $('msg').className = 'msg ' + (kind || ''); }
-async function getJSON(url) { const r = await fetch(url, { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }
+async function getJSON(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (r.status === 401) { location.reload(); throw new Error('login'); }  // 로그인이 풀리면 로그인 화면으로
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
 async function postJSON(url, body) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.status === 401) { location.reload(); throw new Error('login'); }
   return r.json();
 }
 function tradingDay(tsStr) {  // 매매 시각 → 거래일 (09시 전이면 전날)
@@ -553,6 +597,7 @@ function renderAll() {
   renderGuides(d);
   renderMovers(d);
   renderAlerts(d);
+  renderTelegram(d);
   if (!s) { setBeat('bad', '봇이 아직 시작되지 않았어요'); renderEditorIfNeeded(); return; }
   if (!S.sel || !s.slots.some(x => x.market === S.sel)) {
     const prev = S.sel; S.sel = s.slots.length ? s.slots[0].market : null;
@@ -1002,6 +1047,58 @@ $('apply').addEventListener('click', async () => {
   } catch (e) { setMsg('요청을 보내지 못했어요. 파이 연결을 확인해 주세요.', 'bad'); }
   finally { updateFormView(); }
 });
+
+// ---------- 텔레그램 ----------
+function tgMsg(text, kind) { $('tgMsg').textContent = text; $('tgMsg').className = 'msg ' + (kind || ''); }
+function renderTelegram(d) {
+  const t = d.telegram || { connected: false };
+  $('tgOff').hidden = t.connected;
+  $('tgOn').hidden = !t.connected;
+  $('tgChip').textContent = t.connected ? `✅ @${t.bot || '내 봇'} 연결됨` : (t.linking ? `⏳ @${t.linking} 연결 중` : '연결 안 됨');
+  if (t.connected && document.activeElement !== $('tgNotify') && document.activeElement !== $('tgLogin')) {
+    $('tgNotify').checked = t.notify; $('tgLogin').checked = t.login;
+  }
+  $('logout').hidden = !(t.connected && t.login);
+}
+$('tgStart').onclick = async () => {
+  const token = $('tgToken').value.trim(), pin = $('tgPinA').value;
+  if (!token || !pin) { tgMsg('봇 토큰과 PIN을 넣어 주세요.', 'bad'); return; }
+  $('tgStart').disabled = true;
+  try {
+    const r = await postJSON('/api/telegram/start', { token, pin });
+    tgMsg(r.message, r.ok ? 'info' : 'bad');
+    if (r.ok) { $('tgToken').value = ''; $('tgPinA').value = ''; pollLink(Date.now()); }
+  } catch (e) { tgMsg('요청을 보내지 못했어요.', 'bad'); }
+  finally { $('tgStart').disabled = false; }
+};
+async function pollLink(started) {
+  if (Date.now() - started > 300000) { tgMsg('시간이 지났어요. 다시 연결 시작을 눌러 주세요.', 'bad'); return; }
+  try {
+    const r = await postJSON('/api/telegram/link', {});
+    if (!r.ok) { tgMsg(r.message, 'bad'); return; }
+    if (r.linked) { tgMsg('🎉 ' + r.message, 'ok'); toast('✈️ 텔레그램 연결 완료!', 'info'); refreshStatus(); return; }
+    tgMsg(r.message, 'info');
+  } catch (e) {}
+  setTimeout(() => pollLink(started), 3000);
+}
+async function tgAction(action, value) {
+  const pin = $('tgPinB').value;
+  if (!pin) { tgMsg('PIN을 먼저 넣어 주세요.', 'bad'); refreshStatus(); return false; }
+  try {
+    const r = await postJSON('/api/telegram/action', { action, value, pin });
+    tgMsg(r.message, r.ok ? 'ok' : 'bad');
+    refreshStatus();
+    return r.ok;
+  } catch (e) { tgMsg('요청을 보내지 못했어요.', 'bad'); return false; }
+}
+$('tgNotify').onchange = () => tgAction('notify', $('tgNotify').checked);
+$('tgLogin').onchange = () => {
+  if (!$('tgLogin').checked && !confirm('로그인 코드를 끄면 같은 공유기에 있는 누구나 이 화면을 볼 수 있어요. 끌까요?')) { $('tgLogin').checked = true; return; }
+  tgAction('login', $('tgLogin').checked);
+};
+$('tgTest').onclick = () => tgAction('test');
+$('tgOffBtn').onclick = () => { if (confirm('텔레그램 연결을 끊을까요? 로그인 코드와 매매 알림이 멈춰요.')) tgAction('off'); };
+$('logout').onclick = async () => { try { await postJSON('/api/logout', {}); } catch (e) {} location.reload(); };
 
 // ---------- 전략 순위 · 비교 · 설명 ----------
 function renderRanking() {

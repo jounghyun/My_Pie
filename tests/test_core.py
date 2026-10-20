@@ -9,13 +9,17 @@ import hmac
 import json
 import logging
 import math
+import re
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from mypie import backtest, indicators, pin, web
+from mypie import auth, backtest, indicators, keys, pin, web
 from mypie.bot import Bot, validate_slots
 from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
@@ -615,6 +619,130 @@ class WebTest(TempDbTest):
         self.db.upsert_candles("KRW-ETH", [candle("2026-10-19", 1, 2, 0.5, 1.5), candle("2026-10-20", 1.5, 3, 1, 2)])
         data = web.build_candles(self.path, "KRW-ETH", 90)
         self.assertEqual([c["day"] for c in data["candles"]], ["2026-10-19", "2026-10-20"])
+
+
+class AuthTest(TempDbTest):
+    def test_code_is_single_use_and_limited(self):
+        code = auth.issue_code(self.db, 6)
+        self.assertEqual(len(code), 6)
+        self.assertFalse(auth.check_code(self.db, "x" + code[1:])[0])
+        self.assertTrue(auth.check_code(self.db, code)[0])
+        self.assertFalse(auth.check_code(self.db, code)[0])             # 한 번 쓰면 끝
+
+    def test_resend_cooldown_and_attempt_limit(self):
+        code = auth.issue_code(self.db, 6)
+        with self.assertRaises(auth.TooSoon):
+            auth.issue_code(self.db, 6)                                  # 30초 안에 또 요청
+        for _ in range(auth.MAX_ATTEMPTS):
+            auth.check_code(self.db, "000000" if code != "000000" else "111111")
+        self.assertFalse(auth.check_code(self.db, code)[0])             # 다 틀려서 코드가 지워짐
+
+    def test_expired_code(self):
+        code = auth.issue_code(self.db, 6)
+        stored = self.db.get_state(auth.CODE_KEY)
+        self.db.set_state(auth.CODE_KEY, {**stored, "expires": 0})
+        self.assertFalse(auth.check_code(self.db, code)[0])
+
+    def test_sessions(self):
+        token = auth.create_session(self.db, 30, {"ip": "1.2.3.4"})
+        self.assertTrue(auth.valid_session(self.db, token))
+        self.assertFalse(auth.valid_session(self.db, "nope"))
+        auth.end_session(self.db, token)
+        self.assertFalse(auth.valid_session(self.db, token))
+
+
+class EnvTest(unittest.TestCase):
+    def test_write_env_keeps_other_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            keys.save_keys("access", "secret", path)
+            keys.write_env({"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1"}, path)
+            self.assertEqual(keys.load_keys(path), ("access", "secret"))  # 업비트 키가 지워지면 안 된다
+            self.assertEqual(keys.read_env(path)["TELEGRAM_CHAT_ID"], "1")
+
+
+class TelegramSetupTest(TempDbTest):
+    TOKEN = "123456789:" + "A" * 35
+
+    def setUp(self):
+        super().setUp()
+        self.db.set_state(pin.STATE_KEY, pin.make("2468"))
+        web._pin_failures.clear()
+        web._tg_pending.clear()
+
+    def test_link_from_web(self):
+        def fake_call(token, method, params=None, timeout=8):
+            return {"getMe": {"username": "my_pie_bot"}, "deleteWebhook": True,
+                    "getUpdates": [] if not (params or {}).get("offset") or self.waiting else
+                    [{"update_id": 7, "message": {"chat": {"id": 42, "type": "private"}}}]}[method]
+        self.waiting = True
+        with mock.patch("mypie.telegram.call", side_effect=fake_call), \
+             mock.patch("mypie.telegram.send") as send, \
+             mock.patch("mypie.web.write_env") as write_env:
+            self.assertEqual(web.telegram_start(self.path, {"token": self.TOKEN, "pin": "0000"})[0], 403)
+            self.assertEqual(web.telegram_start(self.path, {"token": "bad", "pin": "2468"})[0], 400)
+            code, body = web.telegram_start(self.path, {"token": self.TOKEN, "pin": "2468"})
+            self.assertEqual((code, body["bot"]), (200, "my_pie_bot"))
+            self.assertFalse(web.telegram_link()[1]["linked"])          # 아직 메시지 안 옴
+            self.waiting = False
+            code, body = web.telegram_link()
+            self.assertTrue(body["linked"])
+            written = write_env.call_args[0][0]
+            self.assertEqual((written["TELEGRAM_BOT_TOKEN"], written["TELEGRAM_CHAT_ID"]), (self.TOKEN, "42"))
+            send.assert_called()
+
+
+class WebLoginTest(TempDbTest):
+    """진짜 웹 서버를 띄워서 텔레그램 코드 로그인 흐름을 확인한다."""
+
+    def setUp(self):
+        super().setUp()
+        web.Handler.db_path = self.path
+        web.Handler.login_enabled = True
+        web.Handler.code_digits = 6
+        self.server = web.ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.sent = []
+        patches = [mock.patch("mypie.telegram.load", return_value=("t", "1")),
+                   mock.patch("mypie.telegram.send", side_effect=lambda text, creds=None: self.sent.append(text))]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        super().tearDown()
+
+    def request(self, path, body=None, cookie=None):
+        req = urllib.request.Request(self.base + path, data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", **({"Cookie": cookie} if cookie else {})})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode(), r.headers.get("Set-Cookie")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(), None
+
+    def test_login_flow(self):
+        self.assertEqual(self.request("/api/status")[0], 401)
+        status, page, _ = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertIn("로그인 코드", page)                                  # 로그인 화면
+        self.assertEqual(self.request("/api/login/send", {})[0], 200)
+        code = re.search(r"코드: (\d{6})", self.sent[-1]).group(1)
+        self.assertEqual(self.request("/api/login/verify", {"code": "x"})[0], 403)
+        status, _, cookie = self.request("/api/login/verify", {"code": code})
+        self.assertEqual(status, 200)
+        session = cookie.split(";")[0]
+        self.assertEqual(self.request("/api/status", cookie=session)[0], 200)
+        self.assertEqual(self.request("/api/control", {}, cookie=None)[0], 401)
+        self.request("/api/logout", {}, cookie=session)
+        self.assertEqual(self.request("/api/status", cookie=session)[0], 401)
+
+    def test_no_login_when_telegram_not_connected(self):
+        with mock.patch("mypie.telegram.load", return_value=None):
+            self.assertEqual(self.request("/api/status")[0], 200)
 
 
 if __name__ == "__main__":

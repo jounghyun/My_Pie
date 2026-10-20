@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My_Pie 로그인</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥧</text></svg>">
+<style>
+  :root { --bg: #f3f4f8; --card: #fff; --text: #15171c; --muted: #6b7280; --line: #e7e9ee;
+          --brand: #6d4aff; --brand2: #ff7a59; --ok: #16a34a; --bad: #e0313f; --soft: #f7f8fb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d0f14; --card: #161a21; --text: #e8eaee; --muted: #9aa1ad; --line: #262b35;
+            --brand: #9b85ff; --brand2: #ff9a7f; --ok: #3ad07f; --bad: #ff5c6c; --soft: #1b2029; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  .card { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 28px 24px;
+          box-shadow: 0 10px 40px rgba(16, 24, 40, .08); text-align: center; }
+  .logo { width: 56px; height: 56px; margin: 0 auto 10px; border-radius: 16px; display: grid; place-items: center; font-size: 30px;
+          background: linear-gradient(135deg, var(--brand), var(--brand2)); }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  p { color: var(--muted); margin: 0 0 18px; font-size: 14px; }
+  input { width: 100%; font: inherit; font-size: 28px; letter-spacing: .4em; text-align: center; padding: 12px; border-radius: 14px;
+          border: 1px solid var(--line); background: var(--soft); color: var(--text); font-variant-numeric: tabular-nums; }
+  input:focus { outline: 2px solid var(--brand); border-color: transparent; }
+  button { width: 100%; font: inherit; font-weight: 700; padding: 12px; border-radius: 14px; border: 0; margin-top: 12px; cursor: pointer;
+           background: linear-gradient(135deg, var(--brand), color-mix(in srgb, var(--brand) 70%, var(--brand2))); color: #fff; min-height: 46px; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .msg { min-height: 1.5em; margin-top: 12px; font-size: 14px; }
+  .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
+  .help { margin-top: 18px; font-size: 12px; color: var(--muted); }
+  code { background: var(--soft); padding: 1px 6px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<form class="card" id="form">
+  <div class="logo">🥧</div>
+  <h1>My_Pie</h1>
+  <p>텔레그램으로 보낸 로그인 코드를 입력하세요</p>
+  <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="······" aria-label="로그인 코드" autofocus>
+  <button type="submit" id="go">로그인</button>
+  <button type="button" class="ghost" id="resend">코드 다시 받기</button>
+  <div class="msg" id="msg"></div>
+  <div class="help">텔레그램이 안 될 때는 파이에서 <code>python3 -m mypie.telegram --code</code></div>
+</form>
+<script>
+const $ = (id) => document.getElementById(id);
+let cooldown = 0;
+function setMsg(text, kind) { $('msg').textContent = text; $('msg').className = 'msg ' + (kind || ''); }
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  return r.json();
+}
+function startCooldown(sec) {
+  cooldown = sec;
+  const b = $('resend');
+  const tick = () => {
+    b.disabled = cooldown > 0;
+    b.textContent = cooldown > 0 ? `코드 다시 받기 (${cooldown}초)` : '코드 다시 받기';
+    if (cooldown-- > 0) setTimeout(tick, 1000);
+  };
+  tick();
+}
+async function sendCode() {
+  try {
+    const d = await post('/api/login/send');
+    setMsg(d.message, d.ok ? 'ok' : (d.wait ? '' : 'bad'));
+    if (d.wait) startCooldown(d.wait);
+  } catch (e) { setMsg('파이에 연결할 수 없어요.', 'bad'); }
+}
+$('resend').onclick = sendCode;
+$('code').oninput = () => { if ($('code').value.length >= 6) $('form').requestSubmit(); };
+$('form').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const code = $('code').value.trim();
+  if (!code) return;
+  $('go').disabled = true;
+  try {
+    const d = await post('/api/login/verify', { code });
+    if (d.ok) { setMsg('🎉 로그인했어요!', 'ok'); location.href = '/'; return; }
+    setMsg(d.message, 'bad');
+    $('code').value = ''; $('code').focus();
+  } catch (e) { setMsg('파이에 연결할 수 없어요.', 'bad'); }
+  finally { $('go').disabled = false; }
+};
+sendCode();  // 들어오자마자 텔레그램으로 코드 보내기
+</script>
+</body>
+</html>

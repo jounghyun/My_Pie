@@ -18,25 +18,37 @@ ACCESS = "UPBIT_ACCESS_KEY"
 SECRET = "UPBIT_SECRET_KEY"
 
 
-def load_keys(path: Path = ENV_PATH) -> tuple[str, str] | None:
-    """(access_key, secret_key). 없으면 None."""
+def read_env(path: Path = ENV_PATH) -> dict:
+    """.env 파일의 KEY=VALUE 목록. 업비트 키와 텔레그램 정보가 같이 들어 있다."""
     if not path.exists():
-        return None
+        return {}
     values = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if "=" in line and not line.lstrip().startswith("#"):
             key, _, value = line.partition("=")
             values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def write_env(updates: dict, path: Path = ENV_PATH) -> None:
+    """.env에 값을 더하거나 바꾼다 (다른 값은 그대로 둔다). 나만 읽을 수 있게 권한 600."""
+    values = {**read_env(path), **updates}
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("".join(f"{k}={v}\n" for k, v in values.items()))
+    os.chmod(path, 0o600)
+
+
+def load_keys(path: Path = ENV_PATH) -> tuple[str, str] | None:
+    """(access_key, secret_key). 없으면 None."""
+    values = read_env(path)
     if values.get(ACCESS) and values.get(SECRET):
         return values[ACCESS], values[SECRET]
     return None
 
 
 def save_keys(access: str, secret: str, path: Path = ENV_PATH) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 나만 읽을 수 있게
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(f"{ACCESS}={access}\n{SECRET}={secret}\n")
-    os.chmod(path, 0o600)
+    write_env({ACCESS: access, SECRET: secret}, path)
 
 
 def days_left(expire_at: str) -> int:
