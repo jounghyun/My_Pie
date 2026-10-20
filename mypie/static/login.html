@@ -39,7 +39,7 @@
   <div class="logo">🥧</div>
   <h1>My_Pie</h1>
   <p>텔레그램으로 보낸 로그인 코드를 입력하세요</p>
-  <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="······" aria-label="로그인 코드" autofocus>
+  <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="__DIGITS__" placeholder="__DIGITS__자리" aria-label="로그인 코드" autofocus>
   <button type="submit" id="go">로그인</button>
   <button type="button" class="ghost" id="resend">코드 다시 받기</button>
   <div class="msg" id="msg"></div>
@@ -71,7 +71,8 @@ async function sendCode() {
   } catch (e) { setMsg('파이에 연결할 수 없어요.', 'bad'); }
 }
 $('resend').onclick = sendCode;
-$('code').oninput = () => { if ($('code').value.length >= 6) $('form').requestSubmit(); };
+const DIGITS = __DIGITS__;
+$('code').oninput = () => { if ($('code').value.length >= DIGITS) $('form').requestSubmit(); };
 $('form').onsubmit = async (ev) => {
   ev.preventDefault();
   const code = $('code').value.trim();

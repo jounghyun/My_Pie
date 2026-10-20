@@ -20,7 +20,7 @@ class MaCross(SignalStrategy):
         short, long_ = sma(c, s), sma(c, l)
         if long_ is None:
             return NOT_ENOUGH
-        return short > long_, f"{s}일선 {short:,.0f} / {l}일선 {long_:,.0f}"
+        return short > long_, f"{s}{self.bar}선 {short:,.0f} / {l}{self.bar}선 {long_:,.0f}"
 
 
 class Rsi(SignalStrategy):
@@ -93,7 +93,7 @@ class Momentum(SignalStrategy):
         if len(c) <= n:
             return NOT_ENOUGH
         ret = c[-1] / c[-1 - n] - 1
-        return ret > 0, f"{n}일 수익률 {ret * 100:+.1f}%"
+        return ret > 0, f"{n}{self.bar} 수익률 {ret * 100:+.1f}%"
 
 
 class Stochastic(SignalStrategy):

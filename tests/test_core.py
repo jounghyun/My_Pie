@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from mypie import auth, backtest, indicators, keys, pin, web
+from mypie import auth, backtest, indicators, keys, pin, timeframes, upbit, web
 from mypie.bot import Bot, validate_slots
 from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
@@ -96,14 +96,13 @@ class FakeClient:
 
 
 class FakeMarket:
-    """가짜 시세: 종목마다 어제 일봉, 오늘 시가, 현재가."""
+    """가짜 시세: 종목·판단 주기마다 직전 봉, 지금 봉의 시가, 현재가."""
 
     def __init__(self):
-        self.price, self.today, self.prev = {}, {}, {}
+        self.price, self.bars = {}, {}
 
-    def set(self, market, day, today_open, prev, price):
-        self.today[market] = candle(day, today_open, today_open, today_open, price)
-        self.prev[market] = prev
+    def set(self, market, day, today_open, prev, price, tf="1d"):
+        self.bars[(market, tf)] = (candle(day, today_open, today_open, today_open, price), prev)
         self.price[market] = price
 
     def prices(self, markets):
@@ -112,14 +111,44 @@ class FakeMarket:
             raise UpbitError("Code not found (테스트)", status=404, name="not_found")
         return {m: self.price[m] for m in markets}
 
-    def candles(self, market, count=200, to=None):
-        return [] if to else [self.today[market], self.prev[market]]
+    def candles(self, market, tf="1d", count=200, to=None):
+        return [] if to else list(self.bars[(market, tf)])
 
 
 class TradingDayTest(unittest.TestCase):
     def test_rolls_over_at_9am_kst(self):
         self.assertEqual(trading_day(datetime(2026, 10, 21, 8, 59, 59, tzinfo=KST)), "2026-10-20")
         self.assertEqual(trading_day(datetime(2026, 10, 21, 9, 0, 0, tzinfo=KST)), "2026-10-21")
+
+
+class TimeframeTest(unittest.TestCase):
+    NOW = datetime(2026, 10, 21, 14, 37, 5, tzinfo=KST)                  # = 05:37 UTC
+
+    def test_bar_keys(self):
+        self.assertEqual(timeframes.bar_key("1d", self.NOW), "2026-10-21")
+        self.assertEqual(timeframes.bar_key("240m", self.NOW), "2026-10-21T04:00")  # KST 13:00에 시작한 4시간봉
+        self.assertEqual(timeframes.bar_key("60m", self.NOW), "2026-10-21T05:00")
+        self.assertEqual(timeframes.bar_key("15m", self.NOW), "2026-10-21T05:30")
+        self.assertEqual(timeframes.bar_key("1d", datetime(2026, 10, 21, 8, 0, tzinfo=KST)), "2026-10-20")
+
+    def test_next_bar(self):
+        self.assertEqual(timeframes.next_bar("60m", self.NOW).astimezone(KST).strftime("%H:%M"), "15:00")
+        self.assertEqual(timeframes.next_bar("240m", self.NOW).astimezone(KST).strftime("%H:%M"), "17:00")
+        self.assertEqual(timeframes.next_bar("1d", self.NOW).astimezone(KST).strftime("%d %H:%M"), "22 09:00")
+
+    def test_minute_candles_from_upbit(self):
+        raw = [{"candle_date_time_utc": "2026-10-21T05:00:00", "opening_price": 1, "high_price": 2, "low_price": 0.5,
+                "trade_price": 1.5, "candle_acc_trade_volume": 3}]
+        with mock.patch("mypie.upbit._get", return_value=raw) as get:
+            bars = upbit.get_candles("KRW-BTC", "60m", 200, to="2026-10-21T06:00")
+        self.assertEqual(bars[0]["day"], "2026-10-21T05:00")
+        path, params = get.call_args[0]
+        self.assertEqual((path, params["to"]), ("/candles/minutes/60", "2026-10-21T06:00:00"))
+
+    def test_slot_validation(self):
+        ok, _ = validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 10}])
+        self.assertEqual(ok[0]["tf"], "1d")                                # 주기를 안 정하면 일봉
+        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "tf": "7m", "weight": 10}])[1])
 
 
 class IndicatorTest(unittest.TestCase):
@@ -359,10 +388,12 @@ class BotFlowTest(TempDbTest):
     def make_bot(self):
         return Bot(self.cfg, self.db, self.factory)
 
-    def go(self, bot, day, steps=1, errors_ok=False, ip="1.1.1.1"):
+    def go(self, bot, day, steps=1, errors_ok=False, ip="1.1.1.1", hour=None):
+        """day 거래일(분봉 줄이 있으면 hour 봉 키도)에 봇을 steps번 돌린다."""
         with mock.patch("mypie.bot.trading_day", return_value=day), \
+             mock.patch("mypie.bot.bar_key", side_effect=lambda tf, now=None: hour), \
              mock.patch("mypie.upbit.get_prices", side_effect=self.market.prices), \
-             mock.patch("mypie.upbit.get_daily_candles", side_effect=self.market.candles), \
+             mock.patch("mypie.upbit.get_candles", side_effect=self.market.candles), \
              mock.patch("mypie.upbit.get_krw_markets", return_value=[]), \
              mock.patch("mypie.upbit.get_tickers", return_value=[]), \
              mock.patch("mypie.network.public_ip", return_value=ip):
@@ -388,7 +419,7 @@ class BotFlowTest(TempDbTest):
                                             "initial_krw": 1_000_000.0})
         bot = self.make_bot()
         self.assertEqual([s.conf() for s in bot.slots],
-                         [{"id": "s1", "market": "KRW-BTC", "strategy": "turtle", "weight": 100.0}])
+                         [{"id": "s1", "market": "KRW-BTC", "strategy": "turtle", "tf": "1d", "weight": 100.0}])
         self.assertAlmostEqual(bot.book.slot("s1")["krw"], 900_000)
         self.assertAlmostEqual(bot.book.data["contributions"], 1_000_000)
 
@@ -541,6 +572,38 @@ class BotFlowTest(TempDbTest):
         self.assertTrue(self.db.get_state("status")["network"]["ip_changed"])
         self.assertTrue(any("IP가 바뀐" in e["message"] for e in self.db.recent_events(10)))
 
+    def test_hourly_slot_plans_every_hour_and_daily_slot_is_untouched(self):
+        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 50), ("h", "KRW-ETH", "volatility_breakout", 50))
+        settings = self.db.get_state("settings")
+        settings["slots"][1]["tf"] = "60m"
+        self.db.set_state("settings", settings)
+        bot = self.make_bot()
+        self.btc(self.D1, 110)                                           # 일봉 줄: 목표가 120 대기
+        h1, h2 = "2026-10-21T03:00", "2026-10-21T04:00"
+        eth_prev = candle("2026-10-21T02:00", 90, 120, 80, 100)           # 1시간봉 목표가 120
+        self.market.set("KRW-ETH", h1, 100, eth_prev, 125, tf="60m")
+        self.go(bot, self.D1, hour=h1)                                    # 1시간봉 줄만 돌파 매수
+        self.assertEqual(self.trades(), [("buy", "KRW-ETH")])
+        self.assertIn("다음 봉 시작", self.db.get_state("status")["slots"][1]["state_text"])
+
+        self.market.set("KRW-ETH", h2, 130, candle(h1, 100, 130, 100, 126), 130, tf="60m")
+        self.go(bot, self.D1, hour=h2)                                    # 다음 봉 시작 → 매도 (일봉은 그대로)
+        self.assertEqual(self.trades(), [("buy", "KRW-ETH"), ("sell", "KRW-ETH")])
+        self.assertEqual(bot.slots[0].plan_day, self.D1)
+        self.assertEqual(bot.slots[1].plan_day, h2)
+
+    def test_timeframe_change_sells_that_row(self):
+        self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.go(bot, self.D1)                                             # 일봉 바이앤홀드 매수
+        self.db.set_state("control_request", {"mode": "paper", "slots": [
+            {"id": "a", "market": "KRW-BTC", "strategy": "buy_and_hold", "tf": "240m", "weight": 100}]})
+        self.market.set("KRW-BTC", "2026-10-21T00:00", 100, candle("2026-10-20T20:00", 100, 100, 100, 100), 100, tf="240m")
+        self.go(bot, self.D1, hour="2026-10-21T00:00")
+        self.assertEqual(self.trades()[:2], [("buy", "KRW-BTC"), ("sell", "KRW-BTC")])
+        self.assertEqual(bot.slots[0].tf, "240m")
+
     def test_live_without_keys_falls_back_to_paper(self):
         self.portfolio(("a", "KRW-BTC", "rsi", 100), mode="live", budget=100_000)
         with mock.patch("mypie.bot.load_keys", return_value=None):
@@ -598,7 +661,10 @@ class WebTest(TempDbTest):
         self.assertEqual(web.request_ranking(self.path, "KRW-SOL")[0], 200)
         web.request_ranking(self.path, "KRW-XRP")
         web.request_ranking(self.path, "KRW-SOL")                       # 이미 줄 서 있으면 다시 넣지 않는다
-        self.assertEqual(self.db.get_state("ranking_request")["markets"], ["KRW-SOL", "KRW-XRP"])
+        self.assertEqual(self.db.get_state("ranking_request")["markets"], ["KRW-SOL|1d", "KRW-XRP|1d"])
+        self.assertEqual(web.request_ranking(self.path, "KRW-SOL", "60m")[0], 200)
+        self.assertIn("KRW-SOL|60m", self.db.get_state("ranking_request")["markets"])
+        self.assertEqual(web.request_ranking(self.path, "KRW-SOL", "7m")[0], 400)
         self.assertEqual(web.request_ranking(self.path, "SOL")[0], 400)
 
     def test_stats(self):
@@ -729,6 +795,7 @@ class WebLoginTest(TempDbTest):
         status, page, _ = self.request("/")
         self.assertEqual(status, 200)
         self.assertIn("로그인 코드", page)                                  # 로그인 화면
+        self.assertIn('maxlength="6"', page)                               # 설정한 자릿수가 들어감
         self.assertEqual(self.request("/api/login/send", {})[0], 200)
         code = re.search(r"코드: (\d{6})", self.sent[-1]).group(1)
         self.assertEqual(self.request("/api/login/verify", {"code": "x"})[0], 403)

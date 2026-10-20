@@ -6,7 +6,8 @@
 포트폴리오는 여러 줄(slot)로 되어 있고, 줄마다 종목 + 전략 + 비중(%)이 있다.
 줄마다 따로 판단하고 따로 사고판다 (돈도 줄마다 따로, broker.Book 참고).
 
-매일 09:00(KST)에 줄마다 오늘 계획을 세우고, 매도 신호가 난 줄을 먼저 판 다음 매수 신호가 난 줄을 산다.
+줄마다 판단 주기(일봉·4시간봉·1시간봉·15분봉)가 있다. 그 주기의 새 봉이 시작될 때(일봉은 매일 09:00 KST)
+계획을 세우고, 매도 신호가 난 줄을 먼저 판 다음 매수 신호가 난 줄을 산다 ('보유 유지'는 그대로).
 그 뒤 10초마다 현재가를 보면서 돌파 매수·이탈 매도를 한다.
 
 전원이 나갔다 들어오거나 재시작돼도 멈추지 않는다. 끊기기 전에 낸 주문이 있으면 업비트에 물어서
@@ -23,14 +24,15 @@ import time
 import uuid
 from dataclasses import asdict
 
-from . import backtest, network, telegram, upbit
+from . import backtest, network, telegram, timeframes, upbit
 from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, sync_full
 from .config import load_config
 from .db import Database
 from .history import sync_candles
 from .keys import days_left, load_keys
 from .strategies import STRATEGIES, DayPlan, create_strategy, strategy_params
-from .timeutil import trading_day, ts
+from .timeframes import bar_key, next_bar
+from .timeutil import KST, trading_day, ts
 
 log = logging.getLogger("mypie.bot")
 
@@ -45,22 +47,34 @@ MARKET_PATTERN = re.compile(r"^KRW-[A-Z0-9]{1,15}$")
 
 
 class Slot:
-    """포트폴리오의 한 줄: 종목 + 전략 + 비중."""
+    """포트폴리오의 한 줄: 종목 + 전략 + 판단 주기 + 비중."""
 
     def __init__(self, cfg: dict, conf: dict):
         self.id = conf["id"]
         self.market = conf["market"]
+        self.tf = conf.get("tf") or timeframes.DEFAULT
         self.weight = float(conf["weight"])
-        self.strategy = create_strategy(conf["strategy"], strategy_params(cfg, conf["strategy"]))
+        params = {**strategy_params(cfg, conf["strategy"]), "_bar": timeframes.TIMEFRAMES[self.tf]["bar"]}
+        self.strategy = create_strategy(conf["strategy"], params)
         self.plan: DayPlan | None = None
-        self.plan_day: str | None = None
+        self.plan_day: str | None = None  # 계획을 세운 봉의 키 (일봉이면 날짜)
 
     @property
     def coin(self) -> str:
         return self.market.split("-")[-1]
 
+    @property
+    def rank_key(self) -> str:
+        return ranking_key(self.market, self.tf)
+
     def conf(self) -> dict:
-        return {"id": self.id, "market": self.market, "strategy": self.strategy.name, "weight": self.weight}
+        return {"id": self.id, "market": self.market, "strategy": self.strategy.name, "tf": self.tf,
+                "weight": self.weight}
+
+
+def ranking_key(market: str, tf: str) -> str:
+    """전략 순위는 종목 × 판단 주기마다 따로다."""
+    return f"{market}|{tf}"
 
 
 def new_slot_id() -> str:
@@ -76,6 +90,7 @@ def validate_slots(raw) -> tuple[list[dict] | None, str | None]:
         if not isinstance(item, dict):
             return None, "잘못된 줄이 있어요"
         market, strategy = str(item.get("market", "")), str(item.get("strategy", ""))
+        tf = str(item.get("tf") or timeframes.DEFAULT)
         try:
             weight = float(item.get("weight"))
         except (TypeError, ValueError):
@@ -86,10 +101,13 @@ def validate_slots(raw) -> tuple[list[dict] | None, str | None]:
             return None, f"{market}이(가) 두 번 들어 있어요. 종목마다 한 줄씩만 넣어 주세요"
         if strategy not in STRATEGIES:
             return None, f"알 수 없는 전략: {strategy}"
+        if tf not in timeframes.TIMEFRAMES:
+            return None, f"알 수 없는 판단 주기: {tf}"
         if not 1 <= weight <= 100:
             return None, f"{market}의 비중은 1~100% 사이로 넣어 주세요"
         seen.add(market)
-        slots.append({"id": str(item.get("id") or ""), "market": market, "strategy": strategy, "weight": weight})
+        slots.append({"id": str(item.get("id") or ""), "market": market, "strategy": strategy, "tf": tf,
+                      "weight": weight})
     total = sum(s["weight"] for s in slots)
     if total > 100.0001:
         return None, f"비중 합계가 {total:g}%예요. 100% 이하로 맞춰 주세요"
@@ -238,10 +256,11 @@ class Bot:
         if self.book.data.get("needs_alloc"):
             self.book.allocate(self._weights(), prices)
 
-        ready = [s for s in self.slots if s.plan_day == day or self._start_day(s, day)]
-        self._open_actions(ready, day, prices)
+        bars = {s.id: self._bar(s) for s in self.slots}
+        ready = [s for s in self.slots if s.plan_day == bars[s.id] or self._start_bar(s, bars[s.id])]
+        self._open_actions(ready, bars, prices)
         for s in ready:
-            self._intraday(s, prices[s.market], day)
+            self._intraday(s, prices[s.market], bars[s.id])
 
         self._refresh_exchange()
         self._refresh_market_info()
@@ -255,43 +274,59 @@ class Bot:
             self._update_key_info(day)
         self._update_rankings(day)
 
-    def _start_day(self, slot: Slot, day: str) -> bool:
-        """새 거래일(또는 재시작·설정 변경 직후): 그 줄의 일봉을 받아 오늘 계획을 세운다."""
-        today = sync_candles(self.db, slot.market, self.backtest_days + backtest.WARMUP)
-        if today["day"] != day:
-            log.info("%s 오늘 일봉이 아직 없어 다음 루프에서 다시 시도합니다", slot.market)
+    def _bar(self, slot: Slot) -> str:
+        """그 줄의 판단 주기에서 지금 진행 중인 봉의 키. 일봉이면 거래일(YYYY-MM-DD)."""
+        return trading_day() if slot.tf == "1d" else bar_key(slot.tf)
+
+    def _bars_wanted(self, tf: str) -> int:
+        """백테스트·계획에 쓸 과거 봉 개수."""
+        return (self.backtest_days if tf == "1d" else timeframes.TIMEFRAMES[tf]["backtest_bars"]) + backtest.WARMUP
+
+    def _start_bar(self, slot: Slot, bar: str) -> bool:
+        """새 봉 시작(또는 재시작·설정 변경 직후): 그 줄의 봉을 받아 이번 봉의 계획을 세운다."""
+        current = sync_candles(self.db, slot.market, self._bars_wanted(slot.tf), slot.tf)
+        if current["day"] != bar:
+            log.info("%s %s 새 봉이 아직 없어 다음 루프에서 다시 시도합니다", slot.market, slot.tf)
             return False
-        history = self.db.candle_history(slot.market, backtest.WINDOW)
-        slot.plan = slot.strategy.plan(history, today["open"])
-        slot.plan_day = day
-        self.event("info", f"[{day}] {slot.coin} · {slot.strategy.label} · {slot.plan.note}")
+        history = self.db.candle_history(slot.market, backtest.WINDOW, slot.tf)
+        slot.plan = slot.strategy.plan(history, current["open"])
+        slot.plan_day = bar
+        message = f"[{bar}] {slot.coin} {timeframes.TIMEFRAMES[slot.tf]['short']} · {slot.strategy.label} · {slot.plan.note}"
+        if timeframes.minutes(slot.tf) >= 240:
+            self.event("info", message)
+        else:
+            log.info(message)  # 1시간·15분봉은 너무 잦아서 이벤트 목록에는 남기지 않는다
         return True
 
-    def _open_actions(self, slots: list[Slot], day: str, prices: dict) -> None:
-        """09시 매매. 매도 신호가 난 줄을 먼저 팔고, 그다음 매수 신호가 난 줄을 산다 (보유 유지는 그대로)."""
-        todo = [s for s in slots if self._sstate(s).get("open_done_day") != day]
+    def _open_actions(self, slots: list[Slot], bars: dict, prices: dict) -> None:
+        """봉 시작 매매. 매도 신호가 난 줄을 먼저 팔고, 그다음 매수 신호가 난 줄을 산다 (보유 유지는 그대로).
+        상태의 *_day 값에는 봉 키가 들어간다 (일봉이면 날짜)."""
+        todo = [s for s in slots if self._sstate(s).get("open_done_day") != bars[s.id]]
         for s in todo:
             if self._holding(s, prices[s.market]) and s.plan.sell_at_open:
-                reason = "산 다음 날 09시 매도" if s.strategy.exit_next_open else f"매도 신호 · {s.plan.note}"
+                if s.strategy.exit_next_open:
+                    reason = "산 다음 날 09시 매도" if s.tf == "1d" else "산 다음 봉 시작에 매도"
+                else:
+                    reason = f"매도 신호 · {s.plan.note}"
                 self._sell(s, prices[s.market], reason)
         for s in todo:
             if not self._holding(s, prices[s.market]) and s.plan.buy_at_open:
-                self._buy(s, prices[s.market], day, f"매수 신호 · {s.plan.note}")
-            self._set_sstate(s.id, open_done_day=day)  # 재시작해도 09시 매매를 두 번 하지 않게
+                self._buy(s, prices[s.market], bars[s.id], f"매수 신호 · {s.plan.note}")
+            self._set_sstate(s.id, open_done_day=bars[s.id])  # 재시작해도 봉 시작 매매를 두 번 하지 않게
 
-    def _intraday(self, slot: Slot, price: float, day: str) -> None:
+    def _intraday(self, slot: Slot, price: float, bar: str) -> None:
         plan, st = slot.plan, self._sstate(slot)
         if self._holding(slot, price):
-            if plan.sell_stop is not None and st.get("last_buy_day") != day and price <= plan.sell_stop:
+            if plan.sell_stop is not None and st.get("last_buy_day") != bar and price <= plan.sell_stop:
                 self._sell(slot, price, f"{plan.sell_stop:,.0f}원 이탈")
-                self._set_sstate(slot.id, last_stop_day=day)
+                self._set_sstate(slot.id, last_stop_day=bar)
                 return
             # 입금·비중 변경으로 이 줄의 원화 몫이 생겼으면 같이 굴린다
             if self.book.slot(slot.id)["krw"] >= TOPUP_MIN_KRW:
-                self._buy(slot, price, day, "늘어난 몫만큼 추가 매수", topup=True)
+                self._buy(slot, price, bar, "늘어난 몫만큼 추가 매수", topup=True)
         elif (plan.buy_stop is not None and price >= plan.buy_stop
-              and st.get("last_buy_day") != day and st.get("last_stop_day") != day):
-            self._buy(slot, price, day, f"{plan.buy_stop:,.0f}원 돌파")
+              and st.get("last_buy_day") != bar and st.get("last_stop_day") != bar):
+            self._buy(slot, price, bar, f"{plan.buy_stop:,.0f}원 돌파")
 
     # ---- 주문 ----
     # 주문 오류는 그대로 위로 올려 보낸다. 루프가 잠시 기다렸다 다시 시도하고,
@@ -440,7 +475,8 @@ class Bot:
         self._sync(sync_prices)
         for s in self.slots:
             c = new_by_id.get(s.id)
-            changed = account_changed or c is None or c["market"] != s.market or c["strategy"] != s.strategy.name
+            changed = (account_changed or c is None or c["market"] != s.market
+                       or c["strategy"] != s.strategy.name or c["tf"] != s.tf)
             if changed and self._holding(s, prices[s.market]):
                 self._sell(s, prices[s.market], "포트폴리오 변경")
 
@@ -454,7 +490,8 @@ class Bot:
         for c in slots:
             slot = Slot(self.cfg, c)
             old = old_by_id.get(c["id"])
-            if old and not account_changed and old.market == slot.market and old.strategy.name == slot.strategy.name:
+            if (old and not account_changed and old.market == slot.market
+                    and old.strategy.name == slot.strategy.name and old.tf == slot.tf):
                 slot.plan, slot.plan_day = old.plan, old.plan_day  # 비중만 바뀐 줄은 오늘 계획 그대로
             else:
                 self._drop_sstate(c["id"])
@@ -482,7 +519,9 @@ class Bot:
             account = "모의투자"
         else:
             account = "실거래(계좌 전액)" if budget == "all" else f"실거래(한도 {budget:,.0f}원)"
-        parts = ", ".join(f"{s.coin} {s.strategy.label} {s.weight:g}%" for s in self.slots)
+        parts = ", ".join(f"{s.coin} {s.strategy.label}"
+                          f"{'' if s.tf == '1d' else '(' + timeframes.TIMEFRAMES[s.tf]['short'] + ')'} {s.weight:g}%"
+                          for s in self.slots)
         return f"{account} · {parts}"
 
     # ---- 집 공인 IP (업비트 허용 IP) ----
@@ -555,21 +594,23 @@ class Bot:
         self.db.set_state("market_info", {"updated_at": ts(), "tickers": {t["market"]: t for t in tickers},
                                           "gainers": movers[:5], "losers": movers[::-1][:5]})
 
-    def _state_text(self, slot: Slot, price: float, day: str) -> str:
-        plan, st = slot.plan, self._sstate(slot)
+    def _state_text(self, slot: Slot, price: float) -> str:
+        plan, st, bar = slot.plan, self._sstate(slot), slot.plan_day
         if plan is None:
-            return "오늘 계획을 세우는 중"
+            return "계획을 세우는 중"
+        daily = slot.tf == "1d"
+        at = next_bar(slot.tf).astimezone(KST).strftime("%H:%M")
         if self._holding(slot, price):
             if slot.strategy.exit_next_open:
-                return "내일 09시에 매도 예정"
+                return "내일 09시에 매도 예정" if daily else f"다음 봉 시작({at})에 매도 예정"
             if plan.sell_stop is not None:
                 return f"{plan.sell_stop:,.0f}원 아래로 내려가면 매도"
-            return "보유 유지 · 매도 신호가 나면 09시에 매도"
-        if st.get("last_buy_day") == day or st.get("last_stop_day") == day:
-            return "오늘 매매 완료 · 내일 다시 판단"
+            return "보유 유지 · 매도 신호가 나면 " + ("09시에 매도" if daily else "다음 봉 시작에 매도")
+        if st.get("last_buy_day") == bar or st.get("last_stop_day") == bar:
+            return "오늘 매매 완료 · 내일 다시 판단" if daily else f"이번 봉 매매 완료 · {at}에 다시 판단"
         if plan.buy_stop is not None:
             return f"{plan.buy_stop:,.0f}원 이상 오르면 매수"
-        return "매수 신호를 기다리는 중 (매일 09시 판단)"
+        return "매수 신호를 기다리는 중 · " + ("매일 09시 판단" if daily else f"다음 판단 {at}")
 
     def _write_status(self, day: str) -> None:
         equity = self.book.equity(self.prices)
@@ -583,10 +624,12 @@ class Bot:
             holding = self._holding(s, price)
             slots.append({
                 "id": s.id, "market": s.market, "coin": s.coin, "weight": s.weight, "price": price,
+                "tf": s.tf, "tf_label": timeframes.TIMEFRAMES[s.tf]["short"], "bar": s.plan_day,
+                "next_at": ts(next_bar(s.tf)), "rank_key": s.rank_key,
                 "strategy": {"name": s.strategy.name, "label": s.strategy.label, "description": s.strategy.description,
                              "guide": s.strategy.guide, "exit_next_open": s.strategy.exit_next_open},
                 "plan": asdict(s.plan) if s.plan else None,
-                "state_text": self._state_text(s, price, day),
+                "state_text": self._state_text(s, price),
                 "holding": holding,
                 "book": b, "value": value, "equity": slot_equity,
                 "return_pct": (slot_equity / b["contrib"] - 1) * 100 if b["contrib"] > 0 else None,
@@ -641,48 +684,57 @@ class Bot:
                                   "만료되면 실거래가 멈추니 새 키를 받아 python3 -m mypie.keys 로 등록하세요", notify=True)
 
     def _update_rankings(self, day: str) -> None:
-        """종목별 전략 순위. 포트폴리오 종목은 하루 한 번, 웹페이지에서 요청한 종목은 바로 (한 루프에 하나씩)."""
+        """종목 × 판단 주기별 전략 순위. 포트폴리오 줄은 하루 한 번, 웹페이지에서 요청한 건 바로 (한 루프에 하나씩).
+        요청은 "KRW-BTC|60m" 모양 (주기가 없으면 일봉)."""
         rankings = self.db.get_state("rankings") or {}
         queue = (self.db.get_state("ranking_request") or {}).get("markets", [])
         while queue:
-            market, queue = queue[0], queue[1:]
+            item, queue = queue[0], queue[1:]
             if queue:
                 self.db.set_state("ranking_request", {"markets": queue})
             else:
                 self.db.delete_state("ranking_request")
-            if MARKET_PATTERN.match(market) and (rankings.get(market) or {}).get("day") != day:
-                self._rank_market(market, day, rankings)
+            market, _, tf = item.partition("|")
+            tf = tf or timeframes.DEFAULT
+            key = ranking_key(market, tf)
+            if (MARKET_PATTERN.match(market) and tf in timeframes.TIMEFRAMES
+                    and (rankings.get(key) or {}).get("day") != day):
+                self._rank_market(market, tf, day, rankings)
                 return
         for s in self.slots:
-            if (rankings.get(s.market) or {}).get("day") != day:
-                self._rank_market(s.market, day, rankings)
+            if (rankings.get(s.rank_key) or {}).get("day") != day:
+                self._rank_market(s.market, s.tf, day, rankings)
                 return
 
-    def _rank_market(self, market: str, day: str, rankings: dict) -> None:
+    def _rank_market(self, market: str, tf: str, day: str, rankings: dict) -> None:
+        key = ranking_key(market, tf)
+        wanted = self._bars_wanted(tf)
         try:
-            sync_candles(self.db, market, self.backtest_days + backtest.WARMUP)
+            sync_candles(self.db, market, wanted, tf)
         except upbit.UpbitError as e:
-            log.warning("%s 일봉을 받지 못해서 순위를 계산하지 못했어요: %s", market, e)
-            rankings[market] = {"day": day, "market": market, "error": str(e)}
+            log.warning("%s %s 봉을 받지 못해서 순위를 계산하지 못했어요: %s", market, tf, e)
+            rankings[key] = {"day": day, "market": market, "tf": tf, "error": str(e)}
             self.db.set_state("rankings", rankings)
             return
-        candles = self.db.candle_history(market, self.backtest_days + backtest.WARMUP)
+        candles = self.db.candle_history(market, wanted, tf)
         if len(candles) < backtest.WARMUP + 30:
-            rankings[market] = {"day": day, "market": market, "error": "상장한 지 얼마 안 돼서 과거 데이터가 부족해요"}
+            rankings[key] = {"day": day, "market": market, "tf": tf, "error": "상장한 지 얼마 안 돼서 과거 데이터가 부족해요"}
             self.db.set_state("rankings", rankings)
             return
         started = time.monotonic()
         params = {name: strategy_params(self.cfg, name) for name in STRATEGIES}
-        results = backtest.rank_strategies(candles, self.fee_rate, self.rank_by, params)
-        rankings[market] = {
-            "day": day, "market": market, "computed_at": ts(), "rank_by": self.rank_by,
+        results = backtest.rank_strategies(candles, self.fee_rate, self.rank_by,
+                                           bars_per_year=timeframes.bars_per_year(tf), params=params)
+        rankings[key] = {
+            "day": day, "market": market, "tf": tf, "computed_at": ts(), "rank_by": self.rank_by,
             "from": candles[backtest.WARMUP]["day"], "to": candles[-1]["day"],
             "days": len(candles) - backtest.WARMUP, "results": results,
         }
         self.db.set_state("rankings", rankings)
-        log.info("%s 전략 순위 계산 %.1f초", market, time.monotonic() - started)
+        label = timeframes.TIMEFRAMES[tf]["short"]
+        log.info("%s %s 전략 순위 계산 %.1f초", market, tf, time.monotonic() - started)
         top = results[0]
-        self.event("info", f"{market} 전략 순위 갱신 · 1위 {top['label']} ({top['total_return'] * 100:+.1f}%)")
+        self.event("info", f"{market} {label} 전략 순위 갱신 · 1위 {top['label']} ({top['total_return'] * 100:+.1f}%)")
 
     # ---- 계속 실행 ----
 

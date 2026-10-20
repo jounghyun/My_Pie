@@ -39,9 +39,9 @@ class VolatilityBreakoutMA(VolatilityBreakout):
         if ma is None:
             return DayPlan(sell_at_open=True, note=NOT_ENOUGH)
         if history[-1]["close"] <= ma:
-            return DayPlan(sell_at_open=True, note=f"하락 추세 (종가 < {n}일선) · 오늘은 매수 안 함")
+            return DayPlan(sell_at_open=True, note=f"하락 추세 (종가 < {n}{self.bar}선) · 이번엔 매수 안 함")
         plan = super().plan(history, today_open)
-        plan.note += f" · {n}일선 위"
+        plan.note += f" · {n}{self.bar}선 위"
         return plan
 
 
@@ -61,4 +61,4 @@ class Turtle(Strategy):
         high = max(c["high"] for c in history[-entry:])
         low = min(c["low"] for c in history[-exit_:])
         return DayPlan(buy_stop=high, sell_stop=low,
-                       note=f"{entry}일 최고가 {high:,.0f}원 · {exit_}일 최저가 {low:,.0f}원")
+                       note=f"{entry}{self.bar} 최고가 {high:,.0f}원 · {exit_}{self.bar} 최저가 {low:,.0f}원")

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS events (
     level   TEXT NOT NULL,
     message TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS candles (
+CREATE TABLE IF NOT EXISTS candles (     -- 예전 버전(일봉만)의 표. 처음 켤 때 bars로 옮긴다
     market TEXT NOT NULL,
     day    TEXT NOT NULL,
     open   REAL NOT NULL,
@@ -50,6 +50,17 @@ CREATE TABLE IF NOT EXISTS candles (
     close  REAL NOT NULL,
     volume REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (market, day)
+);
+CREATE TABLE IF NOT EXISTS bars (
+    market TEXT NOT NULL,
+    tf     TEXT NOT NULL,   -- 1d | 240m | 60m | 15m
+    day    TEXT NOT NULL,   -- 봉 키 (시작 시각, UTC): 일봉 2026-10-21, 분봉 2026-10-21T04:00
+    open   REAL NOT NULL,
+    high   REAL NOT NULL,
+    low    REAL NOT NULL,
+    close  REAL NOT NULL,
+    volume REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (market, tf, day)
 );
 """
 
@@ -66,6 +77,10 @@ class Database:
         if create:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.executescript(SCHEMA)
+            if not self.conn.execute("SELECT 1 FROM bars LIMIT 1").fetchone():
+                with self.conn:  # 예전 일봉 표를 새 표로 옮기기
+                    self.conn.execute("INSERT OR IGNORE INTO bars SELECT market, '1d', day, open, high, low, close, volume "
+                                      "FROM candles")
         # WAL에서는 NORMAL이어도 안전하고, SD카드 쓰기가 줄어든다
         self.conn.execute("PRAGMA synchronous=NORMAL")
 
@@ -88,24 +103,24 @@ class Database:
         with self.conn:
             self.conn.execute("DELETE FROM kv WHERE key = ?", (key,))
 
-    def upsert_candles(self, market: str, candles: list[dict]) -> None:
+    def upsert_candles(self, market: str, candles: list[dict], tf: str = "1d") -> None:
         with self.conn:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO candles (market, day, open, high, low, close, volume) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(market, c["day"], c["open"], c["high"], c["low"], c["close"], c.get("volume", 0))
+                "INSERT OR REPLACE INTO bars (market, tf, day, open, high, low, close, volume) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(market, tf, c["day"], c["open"], c["high"], c["low"], c["close"], c.get("volume", 0))
                  for c in candles],
             )
 
-    def candle_history(self, market: str, limit: int) -> list[dict]:
-        """완성된 일봉 최근 limit개 (오래된 것 → 최신)."""
-        rows = self._rows("SELECT day, open, high, low, close, volume FROM candles "
-                          "WHERE market = ? ORDER BY day DESC LIMIT ?", (market, limit))
+    def candle_history(self, market: str, limit: int, tf: str = "1d") -> list[dict]:
+        """완성된 봉 최근 limit개 (오래된 것 → 최신)."""
+        rows = self._rows("SELECT day, open, high, low, close, volume FROM bars "
+                          "WHERE market = ? AND tf = ? ORDER BY day DESC LIMIT ?", (market, tf, limit))
         return rows[::-1]
 
-    def candle_range(self, market: str) -> tuple[int, str | None]:
-        row = self.conn.execute("SELECT COUNT(*) AS n, MIN(day) AS oldest FROM candles WHERE market = ?",
-                                (market,)).fetchone()
+    def candle_range(self, market: str, tf: str = "1d") -> tuple[int, str | None]:
+        row = self.conn.execute("SELECT COUNT(*) AS n, MIN(day) AS oldest FROM bars WHERE market = ? AND tf = ?",
+                                (market, tf)).fetchone()
         return row["n"], row["oldest"]
 
     def add_trade(self, mode: str, market: str, trade: dict) -> None:

@@ -1,4 +1,4 @@
-"""백테스트: 과거 일봉으로 "이 전략을 썼다면?"을 계산해서 순위를 매긴다.
+"""백테스트: 과거 봉(일봉·분봉)으로 "이 전략을 썼다면?"을 계산해서 순위를 매긴다.
 
 실행 규칙은 strategies/base.py 설명과 같고, 실제 봇(bot.py)과도 같다.
 일봉만 보기 때문에 장중 체결가는 이렇게 가정한다:
@@ -13,8 +13,9 @@ WARMUP = 60          # 앞부분은 지표 계산용으로만 쓰고, 모든 전
 CURVE_POINTS = 80    # 화면에 그릴 자산 곡선 점 개수
 
 
-def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: int = WARMUP) -> dict:
-    """candles: 완성된 일봉 (오래된 것 → 최신). 시작 자금 1로 계산한다."""
+def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: int = WARMUP,
+             bars_per_year: float = 365) -> dict:
+    """candles: 완성된 봉 (오래된 것 → 최신). 시작 자금 1로 계산한다. bars_per_year: 1년에 봉이 몇 개인지 (일봉 365)."""
     cash, coin, cost = 1.0, 0.0, 0.0
     trade_returns: list[float] = []
     curve: list[float] = []
@@ -55,11 +56,12 @@ def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: i
 
     days = len(curve)
     final = curve[-1] if curve else 1.0
-    years = days / 365
+    years = days / bars_per_year
     step = max(1, days // CURVE_POINTS)
     return {
         "total_return": final - 1,
-        "cagr": final ** (1 / years) - 1 if years > 0 and final > 0 else None,
+        # 반년도 안 되는 기간(짧은 분봉)을 1년으로 늘려 계산하면 숫자가 터무니없어져서 비워 둔다
+        "cagr": final ** (1 / years) - 1 if years >= 0.5 and final > 0 else None,
         "mdd": mdd,
         "trades": len(trade_returns),
         "win_rate": sum(r > 0 for r in trade_returns) / len(trade_returns) if trade_returns else None,
@@ -74,14 +76,14 @@ def _score(result: dict, rank_by: str) -> float:
     return result["total_return"]
 
 
-def rank_strategies(candles: list[dict], fee_rate: float, rank_by: str = "return",
+def rank_strategies(candles: list[dict], fee_rate: float, rank_by: str = "return", bars_per_year: float = 365,
                     params: dict | None = None) -> list[dict]:
     """모든 전략을 백테스트해서 순위대로 돌려준다. params: {전략이름: 파라미터}."""
     results = []
     for name, cls in STRATEGIES.items():
         strategy = create_strategy(name, (params or {}).get(name))
         results.append({"name": name, "label": cls.label, "description": cls.description, "guide": cls.guide,
-                        **simulate(strategy, candles, fee_rate)})
+                        **simulate(strategy, candles, fee_rate, bars_per_year=bars_per_year)})
     results.sort(key=lambda r: _score(r, rank_by), reverse=True)
     for rank, r in enumerate(results, 1):
         r["rank"] = rank

@@ -3,7 +3,7 @@
 실행: python3 -m mypie.web   →   http://<파이 IP>:8000
 
   GET  /api/status   봇 상태, 순위, 기록 (5초마다)
-  GET  /api/candles  차트용 일봉과 매매 지점 (?market=KRW-BTC&days=90)
+  GET  /api/candles  차트용 봉과 매매 지점 (?market=KRW-BTC&tf=60m&days=90)
   GET  /api/stats    성과 통계, 종목별 성적, 날짜별 손익
   GET  /api/system   라즈베리파이 상태 (온도, 메모리, 디스크, 전원)
   POST /api/control  포트폴리오(종목·전략·비중)·계좌·한도 변경 (PIN 필요)
@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import auth, pin, telegram
+from . import auth, pin, telegram, timeframes
 from .bot import validate_slots
 from .broker import MIN_ORDER_KRW
 from .config import load_config
@@ -66,6 +66,8 @@ def build_payload(db_path: str, max_budget: float) -> dict:
         "limits": {"min_budget": MIN_ORDER_KRW, "max_budget": max_budget},
         "strategies": [{"name": c.name, "label": c.label, "description": c.description, "guide": c.guide}
                        for c in STRATEGIES.values()],
+        "timeframes": [{"id": k, "label": v["label"], "short": v["short"], "minutes": v["minutes"]}
+                       for k, v in timeframes.TIMEFRAMES.items()],
     }
     db = _open(db_path)
     if not db:
@@ -91,18 +93,18 @@ def build_payload(db_path: str, max_budget: float) -> dict:
     return payload
 
 
-def build_candles(db_path: str, market: str, days: int) -> dict:
-    """차트용: 한 종목의 일봉 + 그 기간의 매매 지점."""
+def build_candles(db_path: str, market: str, count: int, tf: str = "1d") -> dict:
+    """차트용: 한 종목의 봉 (일봉·분봉) + 그 기간의 매매 지점."""
     db = _open(db_path)
-    if not db or not MARKET_PATTERN.match(market):
-        return {"market": market, "candles": [], "trades": []}
+    if not db or not MARKET_PATTERN.match(market) or tf not in timeframes.TIMEFRAMES:
+        return {"market": market, "tf": tf, "candles": [], "trades": []}
     try:
         status = db.get_state("status") or {}
-        candles = db.candle_history(market, days)
-        since = f"{candles[0]['day']} 09:00:00" if candles else ""
+        candles = db.candle_history(market, count, tf)
+        since = ts(timeframes.key_to_utc(candles[0]["day"])) if candles else ""
         trades = db.trades(status.get("mode", "paper"), market, since)
         tickers = (db.get_state("market_info") or {}).get("tickers") or {}
-        return {"market": market, "candles": candles, "today": tickers.get(market),
+        return {"market": market, "tf": tf, "candles": candles, "today": tickers.get(market) if tf == "1d" else None,
                 "trades": [{k: t[k] for k in ("ts", "side", "price", "profit")} for t in trades]}
     finally:
         db.close()
@@ -268,21 +270,22 @@ def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, s
     return 200, "봇에게 전했어요. 10초 안에 적용돼요."
 
 
-def request_ranking(db_path: str, market: str) -> tuple[int, str]:
-    """아직 순위가 없는 종목의 전략 순위를 계산해 달라고 봇에게 부탁한다 (읽기만 하는 일이라 PIN 없이)."""
-    if not MARKET_PATTERN.match(market):
+def request_ranking(db_path: str, market: str, tf: str = "1d") -> tuple[int, str]:
+    """아직 순위가 없는 종목·판단 주기의 전략 순위를 계산해 달라고 봇에게 부탁한다 (읽기만 하는 일이라 PIN 없이)."""
+    if not MARKET_PATTERN.match(market) or tf not in timeframes.TIMEFRAMES:
         return 400, "잘못된 종목이에요."
     db = _open(db_path)
     if not db:
         return 503, "봇이 아직 시작되지 않았어요."
+    item = f"{market}|{tf}"
     try:
         queue = (db.get_state("ranking_request") or {}).get("markets", [])
-        if market not in queue:
-            queue = (queue + [market])[-10:]
+        if item not in queue:
+            queue = (queue + [item])[-10:]
         db.set_state("ranking_request", {"markets": queue, "requested_at": ts()})
     finally:
         db.close()
-    return 200, f"{market} 전략 순위를 계산할게요. 10~30초쯤 걸려요."
+    return 200, f"{market} {timeframes.TIMEFRAMES[tf]['short']} 전략 순위를 계산할게요. 10~30초쯤 걸려요."
 
 
 # ---- 텔레그램 연결 (웹페이지에서) ----
@@ -455,7 +458,7 @@ class Handler(BaseHTTPRequestHandler):
     db_path = ""
     max_budget = 1_000_000.0
     login_enabled = True
-    code_digits = 6
+    code_digits = 2
     session_days = 30
     COOKIE = "mypie_session"
 
@@ -481,7 +484,8 @@ class Handler(BaseHTTPRequestHandler):
                 db.close()
 
     def _login_page(self) -> None:
-        self._send(200, (STATIC_DIR / "login.html").read_bytes(), "text/html; charset=utf-8")
+        page = (STATIC_DIR / "login.html").read_text(encoding="utf-8").replace("__DIGITS__", str(self.code_digits))
+        self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
     def do_GET(self) -> None:
         url = urlparse(self.path)
@@ -501,7 +505,8 @@ class Handler(BaseHTTPRequestHandler):
         builders = {
             "/api/status": lambda: build_payload(self.db_path, self.max_budget),
             "/api/candles": lambda: build_candles(self.db_path, query.get("market", ["KRW-BTC"])[0],
-                                                  max(20, min(int(query.get("days", ["90"])[0]), 400))),
+                                                  max(20, min(int(query.get("days", ["90"])[0]), 400)),
+                                                  query.get("tf", ["1d"])[0]),
             "/api/stats": lambda: build_stats(self.db_path),
             "/api/system": lambda: build_system(self.db_path),
         }
@@ -538,7 +543,7 @@ class Handler(BaseHTTPRequestHandler):
                 code, message = request_control(self.db_path, data, self.max_budget)
                 body = {"ok": code == 200, "message": message}
             elif route == "/api/ranking":
-                code, message = request_ranking(self.db_path, str(data.get("market", "")))
+                code, message = request_ranking(self.db_path, str(data.get("market", "")), str(data.get("tf") or "1d"))
                 body = {"ok": code == 200, "message": message}
             elif route == "/api/login/send":
                 code, body = login_send(self.db_path, self.code_digits, self._client())
@@ -587,7 +592,7 @@ def main() -> None:
     Handler.db_path = cfg["general"]["db_path"]
     Handler.max_budget = float(cfg["live"]["max_budget"])
     Handler.login_enabled = bool(cfg["web"]["login"])
-    Handler.code_digits = max(4, min(int(cfg["web"]["code_digits"]), 8))
+    Handler.code_digits = max(2, min(int(cfg["web"]["code_digits"]), 8))
     Handler.session_days = int(cfg["web"]["session_days"])
     host, port = cfg["web"]["host"], int(cfg["web"]["port"])
     server = ThreadingHTTPServer((host, port), Handler)

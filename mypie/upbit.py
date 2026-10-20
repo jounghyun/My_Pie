@@ -126,6 +126,31 @@ def get_daily_candles(market: str, count: int = 200, to: str | None = None) -> l
     ]
 
 
+def get_candles(market: str, tf: str = "1d", count: int = 200, to: str | None = None) -> list[dict]:
+    """봉 목록 (최대 200개, 최신순). to가 없으면 [0]이 진행 중인 봉이다.
+
+    tf: 1d(일봉) | 240m | 60m | 15m (분봉). 봉 키(시작 시각, UTC)는 'day'에 담는다:
+    일봉 "2026-10-21", 분봉 "2026-10-21T04:00". to에도 같은 모양의 키를 넣으면 그보다 이전 봉을 받는다.
+    """
+    if tf == "1d":
+        return get_daily_candles(market, count, to)
+    params = {"market": market, "count": min(count, 200)}
+    if to:
+        params["to"] = f"{to}:00"  # UTC 기준
+    data = _get(f"/candles/minutes/{int(tf[:-1])}", params)
+    return [
+        {
+            "day": raw["candle_date_time_utc"][:16],
+            "open": float(raw["opening_price"]),
+            "high": float(raw["high_price"]),
+            "low": float(raw["low_price"]),
+            "close": float(raw["trade_price"]),
+            "volume": float(raw.get("candle_acc_trade_volume") or 0),
+        }
+        for raw in data
+    ]
+
+
 def get_krw_markets(limit: int = 30) -> list[dict]:
     """원화 마켓을 24시간 거래대금 순으로."""
     markets = [m for m in _get("/market/all", {"isDetails": "false"}) if m["market"].startswith("KRW-")]

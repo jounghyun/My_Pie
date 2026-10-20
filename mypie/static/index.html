@@ -129,6 +129,7 @@
   .slot-strat { font-size: 13px; margin-top: 6px; }
   .slot-strat b { font-weight: 650; }
   .slot-state { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .slot-when { font-size: 12.5px; color: var(--muted); margin-top: 6px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
   .slot-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
   .wbar { height: 6px; border-radius: 3px; background: var(--soft); margin-top: 10px; position: relative; overflow: hidden; }
   .wbar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
@@ -184,7 +185,7 @@
   .guide-now b { color: var(--text); }
 
   .editor { display: grid; gap: 8px; }
-  .erow { display: grid; grid-template-columns: 14px minmax(0, 1.2fr) minmax(0, 1.6fr) 104px 42px; gap: 8px; align-items: center; }
+  .erow { display: grid; grid-template-columns: 14px minmax(0, 1.1fr) minmax(0, .8fr) minmax(0, 1.5fr) 104px 42px; gap: 8px; align-items: center; }
   .erow .swatch { width: 10px; height: 26px; border-radius: 4px; }
   .erow select { width: 100%; min-width: 0; }
   .erow .w { display: flex; align-items: center; gap: 4px; }
@@ -194,6 +195,7 @@
   @media (max-width: 640px) {
     .erow { grid-template-columns: 10px 1fr 96px 42px; }
     .erow .strat { grid-column: 2 / -1; grid-row: 2; }
+    .erow .tfsel { grid-column: 2 / -1; grid-row: 3; }
     .ehead { display: none !important; }
     .erow { padding-bottom: 8px; border-bottom: 1px solid var(--line); }
   }
@@ -311,7 +313,7 @@
       </div>
     </div>
     <div class="card">
-      <div class="label">다음 판단 (매일 09:00)</div>
+      <div class="label" id="nextWho">다음 판단 (매일 09:00)</div>
       <div class="ring-wrap">
         <svg class="ring" viewBox="0 0 80 80" aria-hidden="true">
           <circle cx="40" cy="40" r="32" fill="none" stroke="var(--soft)" stroke-width="9"/>
@@ -583,11 +585,31 @@ function marketName(m) {
 function marketLabel(m) { return `${marketName(m)} ${sym(m)}`; }
 function slotColor(i) { return COLORS[i % COLORS.length]; }
 function ticker(m) { const mi = S.data && S.data.market_info; return mi && mi.tickers ? mi.tickers[m] : null; }
-function ranking(m) { return S.data && S.data.rankings ? S.data.rankings[m] : null; }
-function rankedList(m) {
-  const rk = ranking(m);
+// 순위·차트는 "종목|판단 주기" 키로 나뉜다 (예: KRW-BTC|60m)
+function TF(tf) { return ((S.data && S.data.timeframes) || []).find(t => t.id === tf) || { id: tf, short: tf, label: tf, minutes: 1440 }; }
+function rkey(m, tf) { return `${m}|${tf || '1d'}`; }
+function splitKey(k) { const [m, tf] = (k || '').split('|'); return [m, tf || '1d']; }
+function keyLabel(k) { const [m, tf] = splitKey(k); return marketLabel(m) + (tf === '1d' ? '' : ` · ${TF(tf).short}`); }
+function ranking(k) { return S.data && S.data.rankings ? S.data.rankings[k] : null; }
+function rankedList(k) {
+  const rk = ranking(k);
   if (rk && rk.results) return rk.results;
   return S.data.strategies.map(x => ({ ...x, rank: null }));
+}
+function barKeyOf(tsStr, tf) {  // 매매 시각(KST 문자열) → 그 매매가 일어난 봉의 키
+  if (tf === '1d') return tradingDay(tsStr);
+  const t = parseTs(tsStr).getTime(), mins = TF(tf).minutes * 60e3;
+  return new Date(Math.floor(t / mins) * mins).toISOString().slice(0, 16);
+}
+function barLabel(key, tf) {  // 봉 키 → 화면에 보일 시각 (KST)
+  if (tf === '1d') return key.slice(5);
+  const k = new Date(new Date(key + ':00Z').getTime() + 9 * 3600e3).toISOString();
+  return `${k.slice(5, 10)} ${k.slice(11, 16)}`;
+}
+function leftText(ms) {
+  if (ms < 0) ms = 0;
+  const h = Math.floor(ms / 3600e3), m = Math.floor(ms % 3600e3 / 60e3);
+  return h ? `${h}시간 ${m}분 뒤` : m ? `${m}분 뒤` : '곧';
 }
 
 // ---------- 상태 (5초) ----------
@@ -599,8 +621,8 @@ function renderAll() {
   renderAlerts(d);
   renderTelegram(d);
   if (!s) { setBeat('bad', '봇이 아직 시작되지 않았어요'); renderEditorIfNeeded(); return; }
-  if (!S.sel || !s.slots.some(x => x.market === S.sel)) {
-    const prev = S.sel; S.sel = s.slots.length ? s.slots[0].market : null;
+  if (!S.sel || !s.slots.some(x => x.rank_key === S.sel)) {
+    const prev = S.sel; S.sel = s.slots.length ? s.slots[0].rank_key : null;
     if (prev !== S.sel) refreshCandles();
   }
 
@@ -668,13 +690,13 @@ function renderDonut(s) {
 function planLine(x) {
   const p = x.plan;
   if (!p) return ['준비 중', ''];
-  if (x.holding && x.strategy.exit_next_open) return ['매도 예정', '내일 09시'];
+  if (x.holding && x.strategy.exit_next_open) return ['매도 예정', x.tf === '1d' ? '내일 09시' : `다음 봉 ${x.next_at.slice(11, 16)}`];
   if (x.holding && p.sell_stop != null) return ['매도 기준', priceText(p.sell_stop) + '원'];
   if (!x.holding && p.buy_stop != null) {
     const diff = (p.buy_stop - x.price) / x.price * 100;
     return ['매수 목표', priceText(p.buy_stop) + '원' + (diff > 0 ? ` (${diff.toFixed(2)}% 남음)` : ' 🎯')];
   }
-  return ['오늘 신호', x.holding ? '보유 유지' : '관망'];
+  return [x.tf === '1d' ? '오늘 신호' : '이번 봉 신호', x.holding ? '보유 유지' : '관망'];
 }
 
 function renderSlots(s) {
@@ -682,11 +704,14 @@ function renderSlots(s) {
   const byMarket = (S.stats && S.stats.by_market) || {};
   s.slots.forEach((x, i) => {
     const t = ticker(x.market), rate = t ? (x.price / t.prev_close - 1) * 100 : null;
-    const card = el('div', { class: 'card slot-card' + (x.market === S.sel ? ' sel' : ''), title: '눌러서 이 종목의 차트·순위 보기' });
+    const card = el('div', { class: 'card slot-card' + (x.rank_key === S.sel ? ' sel' : ''), title: '눌러서 이 종목의 차트·순위 보기' });
     card.append(el('div', { class: 'bar', style: `background:${slotColor(i)}` }));
     const head = el('div', { class: 'slot-head' },
       el('div', { class: 'slot-name' }, marketName(x.market), el('small', { text: sym(x.market) })),
       el('span', { class: 'chip', text: `목표 ${x.weight}%` }));
+    const nextMs = parseTs(x.next_at).getTime() - (Date.now() + S.offset);
+    const when = el('div', { class: 'slot-when' }, el('span', { class: 'chip', text: `⏱ ${x.tf_label}` }),
+      ` 다음 판단 ${x.tf === '1d' ? '09:00' : x.next_at.slice(11, 16)} · `, el('span', { 'data-next': x.next_at, text: leftText(nextMs) }));
     const price = el('div', { class: 'slot-price num' }, priceText(x.price) + '원 ');
     if (rate != null) { const b = el('span', { class: 'badge', text: pct(rate) }); tone(b, rate); b.classList.add(rate > 0 ? 'up' : rate < 0 ? 'down' : 'x'); price.append(b); }
     const [pl, pv] = planLine(x);
@@ -701,15 +726,16 @@ function renderSlots(s) {
       el('div', { class: 'tile' }, el('div', { class: 'label', text: m ? `줄 수익률 · ${m.wins}승 ${m.round_trips - m.wins}패` : '줄 수익률' }), ret), right);
     const wbar = el('div', { class: 'wbar', title: `실제 ${x.actual_weight.toFixed(1)}% / 목표 ${x.weight}%` },
       el('i', { style: `width:${Math.min(100, x.actual_weight)}%;background:${slotColor(i)}` }), el('b', { style: `left:${Math.min(100, x.weight)}%` }));
-    card.append(head, price, strat, state, wbar, foot);
-    card.onclick = () => selectMarket(x.market);
+    card.append(head, when, price, strat, state, wbar, foot);
+    card.onclick = () => selectMarket(x.rank_key);
     box.append(card);
   });
 }
 
-function selectMarket(m) {
-  if (S.sel === m) return;
-  S.sel = m;
+function selectMarket(key) {  // key = "종목|주기" (주기를 빼면 일봉)
+  if (!key.includes('|')) key = rkey(key, '1d');
+  if (S.sel === key) return;
+  S.sel = key;
   refreshCandles();
   if (S.data) renderAll();
 }
@@ -717,20 +743,21 @@ function selectMarket(m) {
 function renderPills() {
   for (const id of ['chartPills', 'rankPills']) {
     const box = $(id); box.innerHTML = '';
-    const markets = (S.data.status ? S.data.status.slots.map(x => x.market) : []);
-    if (S.sel && !markets.includes(S.sel)) markets.push(S.sel);
-    for (const m of markets) {
-      const b = el('button', { class: 'pill', type: 'button', 'aria-pressed': m === S.sel, text: marketLabel(m) });
-      b.onclick = () => selectMarket(m);
+    const keys = (S.data.status ? S.data.status.slots.map(x => x.rank_key) : []);
+    if (S.sel && !keys.includes(S.sel)) keys.push(S.sel);
+    for (const k of keys) {
+      const b = el('button', { class: 'pill', type: 'button', 'aria-pressed': k === S.sel, text: keyLabel(k) });
+      b.onclick = () => selectMarket(k);
       box.append(b);
     }
   }
 }
 
 function renderSelected(s) {
-  const x = s.slots.find(v => v.market === S.sel);
-  const t = ticker(S.sel);
-  $('selLabel').textContent = S.sel ? `${marketLabel(S.sel)}` : '선택한 종목';
+  const [market] = splitKey(S.sel);
+  const x = s.slots.find(v => v.rank_key === S.sel) || s.slots.find(v => v.market === market);
+  const t = ticker(market);
+  $('selLabel').textContent = S.sel ? marketLabel(market) : '선택한 종목';
   const price = x ? x.price : (t ? t.price : null);
   $('selPrice').textContent = price == null ? '-' : priceText(price) + '원';
   if (t && price != null) {
@@ -770,23 +797,39 @@ function tick() {
   const now = Date.now() + S.offset;
   const kst = new Date(now + 9 * 3600e3);
   $('clock').textContent = kst.toISOString().slice(11, 19) + ' KST';
-  const n = new Date(now);
-  const next = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate() + 1);  // 다음 00:00 UTC = 09:00 KST
-  const left = next - now;
+  // 줄마다 판단 주기가 다르니, 가장 먼저 돌아오는 판단까지 센다
+  const slots = (S.data && S.data.status && S.data.status.slots) || [];
+  let next = null, period = 86400e3, who = '';
+  for (const x of slots) {
+    const t = parseTs(x.next_at).getTime();
+    if (next == null || t < next) { next = t; period = TF(x.tf).minutes * 60e3; who = `${sym(x.market)} ${x.tf_label}`; }
+  }
+  if (next == null) {
+    const n = new Date(now);
+    next = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate() + 1);  // 다음 00:00 UTC = 09:00 KST
+  }
+  const left = Math.max(0, next - now);
   const h = Math.floor(left / 3600e3), m = Math.floor(left % 3600e3 / 60e3), sec = Math.floor(left % 60e3 / 1e3);
   $('countdown').textContent = [h, m, sec].map(v => String(v).padStart(2, '0')).join(':');
-  $('ringArc').setAttribute('stroke-dashoffset', (201 * left / 86400e3).toFixed(1));
+  $('ringArc').setAttribute('stroke-dashoffset', (201 * Math.min(1, left / period)).toFixed(1));
+  $('nextWho').textContent = who ? `다음 판단 · ${who}` : '다음 판단 (매일 09:00)';
+  document.querySelectorAll('[data-next]').forEach(e => { e.textContent = leftText(parseTs(e.dataset.next).getTime() - now); });
 }
 
 // ---------- 캔들 차트 ----------
 function renderCandles() {
   const box = $('candleBox'), c = S.candles, s = S.data && S.data.status;
-  if (!c || c.market !== S.sel) return;
-  const slot = s && s.slots.find(x => x.market === c.market);
+  if (!c || rkey(c.market, c.tf) !== S.sel) return;
+  const tf = c.tf || '1d';
+  const slot = s && (s.slots.find(x => x.rank_key === S.sel) || s.slots.find(x => x.market === c.market));
   const rows = (c.candles || []).slice();
   const t = c.today, price = slot ? slot.price : (t ? t.price : null);
-  if (t && s && price != null && (!rows.length || rows[rows.length - 1].day < s.day))
+  if (tf === '1d' && t && s && price != null && (!rows.length || rows[rows.length - 1].day < s.day))
     rows.push({ day: s.day, open: t.open, high: Math.max(t.high, price), low: Math.min(t.low, price), close: price, volume: 0, live: true });
+  else if (tf !== '1d' && slot && slot.bar && rows.length && rows[rows.length - 1].day < slot.bar && price != null) {
+    const prevClose = rows[rows.length - 1].close;  // 진행 중인 봉: 시가는 직전 종가로 대신 보여준다
+    rows.push({ day: slot.bar, open: prevClose, high: Math.max(prevClose, price), low: Math.min(prevClose, price), close: price, volume: 0, live: true });
+  }
   if (rows.length < 2) { box.innerHTML = '<div class="empty">차트 데이터를 모으는 중이에요 (처음 고른 종목은 1분쯤 걸려요)</div>'; $('candleLegend').innerHTML = ''; return; }
   const W = Math.max(320, box.clientWidth), H = W < 600 ? 260 : 330, padR = 64, padT = 10, volH = 42, gap = 10;
   const priceH = H - volH - gap - 22;
@@ -816,7 +859,7 @@ function renderCandles() {
     const top = y(Math.max(r.open, r.close)), h = Math.max(1, Math.abs(y(r.open) - y(r.close)));
     root.append(svg('rect', { x: cx - bw / 2, y: top, width: bw, height: h, fill: color, rx: 1, opacity: r.live ? .55 : 1 }));
     if (r.volume) { const vh = r.volume / vmax * volH; root.append(svg('rect', { x: cx - bw / 2, y: H - 22 - vh, width: bw, height: vh, fill: color, opacity: .28 })); }
-    if (i % every === 0) { const tx = svg('text', { x: cx, y: H - 6, 'font-size': 11, fill: 'var(--muted)', 'text-anchor': 'middle' }); tx.textContent = r.day.slice(5); root.append(tx); }
+    if (i % every === 0) { const tx = svg('text', { x: cx, y: H - 6, 'font-size': 11, fill: 'var(--muted)', 'text-anchor': 'middle' }); tx.textContent = barLabel(r.day, tf); root.append(tx); }
   });
   for (const l of levels) {
     const yy = y(l.v);
@@ -825,7 +868,7 @@ function renderCandles() {
   }
   const index = Object.fromEntries(rows.map((r, i) => [r.day, i]));
   for (const tr of (c.trades || [])) {
-    const i = index[tradingDay(tr.ts)];
+    const i = index[barKeyOf(tr.ts, tf)];
     if (i == null) continue;
     const r = rows[i], buy = tr.side === 'buy', cx = x(i), yy = buy ? y(r.low) + 12 : y(r.high) - 12;
     const tri = buy ? `${cx},${yy - 6} ${cx - 6},${yy + 5} ${cx + 6},${yy + 5}` : `${cx},${yy + 6} ${cx - 6},${yy - 5} ${cx + 6},${yy - 5}`;
@@ -847,10 +890,10 @@ function renderCandles() {
     cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('opacity', .7);
     const prev = rows[i - 1], chg = prev ? (r.close / prev.close - 1) * 100 : null;
     tip.innerHTML = '';
-    tip.append(el('b', { text: r.day + (r.live ? ' (진행 중)' : '') }),
+    tip.append(el('b', { text: (tf === '1d' ? r.day : barLabel(r.day, tf) + ' 시작') + (r.live ? ' (진행 중)' : '') }),
       el('div', { text: `시가 ${priceText(r.open)} · 고가 ${priceText(r.high)}` }),
       el('div', { text: `저가 ${priceText(r.low)} · 종가 ${priceText(r.close)}` }));
-    if (chg != null) { const cdiv = el('div', { text: `전일 대비 ${pct(chg)}` }); tone(cdiv, chg); tip.append(cdiv); }
+    if (chg != null) { const cdiv = el('div', { text: `${tf === '1d' ? '전일' : '직전 봉'} 대비 ${pct(chg)}` }); tone(cdiv, chg); tip.append(cdiv); }
     tip.hidden = false;
     tip.style.left = Math.min(x(i) * rect.width / W + 12, rect.width - 190) + 'px';
     tip.style.top = '10px';
@@ -860,7 +903,10 @@ function renderCandles() {
   $('candleLegend').append(
     el('span', {}, el('i', { style: 'background:var(--up)' }), '상승 · ▲매수'),
     el('span', {}, el('i', { style: 'background:var(--down)' }), '하락 · ▼매도'),
-    el('span', { text: `${marketLabel(c.market)} · ${rows[0].day} ~ ${rows[n - 1].day}` }));
+    el('span', { text: `${keyLabel(S.sel)} · ${barLabel(rows[0].day, tf)} ~ ${barLabel(rows[n - 1].day, tf)}` }));
+  $('chartSub').textContent = `${tf === '1d' ? '일봉' : TF(tf).label} · ▲매수 ▼매도`;
+  const unit = tf === '1d' ? ['1달', '3달', '6달', '1년'] : ['30봉', '90봉', '180봉', '365봉'];
+  [...$('daysSeg').children].forEach((b, i) => { b.textContent = unit[i]; });
 }
 $('daysSeg').addEventListener('click', (ev) => {
   const b = ev.target.closest('button'); if (!b) return;
@@ -927,8 +973,10 @@ function marketChoices(current) {
 }
 function renderEditor() {
   const box = $('editor'); box.innerHTML = '';
-  box.append(el('div', { class: 'erow ehead' }, el('span'), el('span', { text: '종목' }), el('span', { text: '전략 (이 종목 기준 순위)' }), el('span', { text: '비중' }), el('span')));
+  box.append(el('div', { class: 'erow ehead' }, el('span'), el('span', { text: '종목' }), el('span', { text: '판단 주기' }),
+                el('span', { text: '전략 (이 종목·주기 기준 순위)' }), el('span', { text: '비중' }), el('span')));
   S.rows.forEach((row, i) => {
+    row.tf = row.tf || '1d';
     const used = new Set(S.rows.filter((_, j) => j !== i).map(r => r.market));
     const ms = el('select', { 'aria-label': '종목' });
     for (const m of marketChoices(row.market)) {
@@ -937,13 +985,17 @@ function renderEditor() {
       ms.append(opt);
     }
     ms.value = row.market;
-    ms.onchange = () => { row.market = ms.value; touch(); requestRanking(row.market); renderEditor(); };
+    ms.onchange = () => { row.market = ms.value; touch(); requestRanking(row.market, row.tf); renderEditor(); };
+    const ts_ = el('select', { 'aria-label': '판단 주기', class: 'tfsel', title: '이 주기의 봉이 바뀔 때마다 계획을 새로 세워요' });
+    for (const t of (S.data.timeframes || [])) ts_.append(el('option', { value: t.id, text: t.label }));
+    ts_.value = row.tf;
+    ts_.onchange = () => { row.tf = ts_.value; S.focusRow = i; touch(); requestRanking(row.market, row.tf); renderEditor(); };
     const ss = el('select', { 'aria-label': '전략', class: 'strat' });
-    const rk = ranking(row.market);
-    for (const r of rankedList(row.market)) {
+    const key = rkey(row.market, row.tf), rk = ranking(key);
+    for (const r of rankedList(key)) {
       ss.append(el('option', { value: r.name, text: (r.rank ? `${r.rank}위 · ` : '') + r.label + (r.total_return != null ? ` (${pct(r.total_return * 100, 0)})` : '') }));
     }
-    if (!rk || !rk.results) ss.append(el('option', { disabled: '', text: rk && rk.error ? `⚠️ ${rk.error}` : '⏳ 이 종목 순위 계산 중…' }));
+    if (!rk || !rk.results) ss.append(el('option', { disabled: '', text: rk && rk.error ? `⚠️ ${rk.error}` : '⏳ 이 종목·주기 순위 계산 중…' }));
     ss.value = row.strategy;
     ss.onchange = () => { row.strategy = ss.value; S.focusRow = i; touch(); };
     ss.onfocus = () => { S.focusRow = i; updateFormView(); };
@@ -951,20 +1003,20 @@ function renderEditor() {
     w.oninput = () => { row.weight = Number(w.value); touch(); };
     const del = el('button', { type: 'button', class: 'del', title: '이 줄 빼기', text: '🗑' });
     del.onclick = () => { S.rows.splice(i, 1); touch(); renderEditor(); };
-    box.append(el('div', { class: 'erow' }, el('span', { class: 'swatch', style: `background:${slotColor(i)}` }), ms, ss,
+    box.append(el('div', { class: 'erow' }, el('span', { class: 'swatch', style: `background:${slotColor(i)}` }), ms, ts_, ss,
                    el('div', { class: 'w' }, w, el('span', { class: 'hint', text: '%' })), del));
-    if (!rk) requestRanking(row.market);
+    if (!rk) requestRanking(row.market, row.tf);
   });
   if (!S.rows.length) box.append(el('div', { class: 'empty', text: '종목을 하나 이상 추가해 주세요' }));
   updateFormView();
 }
-function addRow(market, strategy) {
+function addRow(market, strategy, tf = '1d') {
   if (S.rows.length >= 10) { S.userMsg = true; setMsg('종목은 10개까지 넣을 수 있어요.', 'bad'); return; }
   if (S.rows.some(r => r.market === market)) return;
   const sum = S.rows.reduce((t, r) => t + (Number(r.weight) || 0), 0);
-  const first = rankedList(market)[0];
-  S.rows.push({ id: '', market, strategy: strategy || (first ? first.name : 'volatility_breakout'), weight: Math.max(1, Math.min(20, 100 - sum)) });
-  touch(); requestRanking(market); renderEditor();
+  const first = rankedList(rkey(market, tf))[0];
+  S.rows.push({ id: '', market, tf, strategy: strategy || (first ? first.name : 'volatility_breakout'), weight: Math.max(1, Math.min(20, 100 - sum)) });
+  touch(); requestRanking(market, tf); renderEditor();
 }
 $('addRow').onclick = () => {
   const free = marketChoices().find(m => !S.rows.some(r => r.market === m));
@@ -976,10 +1028,11 @@ $('equalize').onclick = () => {
   S.rows.forEach((r, i) => { r.weight = each + (i < 100 - each * S.rows.length ? 1 : 0); });
   touch(); renderEditor();
 };
-async function requestRanking(market) {
-  if (!market || ranking(market) || Date.now() - (S.requested[market] || 0) < 120000) return;
-  S.requested[market] = Date.now();
-  try { await postJSON('/api/ranking', { market }); } catch (e) {}
+async function requestRanking(market, tf = '1d') {
+  const key = rkey(market, tf);
+  if (!market || ranking(key) || Date.now() - (S.requested[key] || 0) < 120000) return;
+  S.requested[key] = Date.now();
+  try { await postJSON('/api/ranking', { market, tf }); } catch (e) {}
 }
 function touch() { S.dirty = true; updateFormView(); }
 function updateFormView() {
@@ -1011,7 +1064,7 @@ function updateFormView() {
   $('pin').disabled = !ready;
   $('apply').disabled = !ready || sum > 100 || !S.rows.length;
   const row = S.rows[S.focusRow != null && S.rows[S.focusRow] ? S.focusRow : 0];
-  const g = row && d ? rankedList(row.market).find(r => r.name === row.strategy) : null;
+  const g = row && d ? rankedList(rkey(row.market, row.tf)).find(r => r.name === row.strategy) : null;
   $('pickGuide').hidden = !g;
   if (g) { $('pickGuide').innerHTML = ''; $('pickGuide').append(el('b', { text: `💡 ${sym(row.market)} · ${g.label} · ` }), g.guide || g.description); }
   if (d && d.pending) { setMsg('설정을 바꾸는 중이에요…', 'info'); S.userMsg = false; }
@@ -1028,14 +1081,14 @@ $('apply').addEventListener('click', async () => {
   if (!s) return;
   const cur = s.settings, all = S.mode === 'live' && $('budgetAll').checked;
   const body = { mode: S.mode, budget: all ? 'all' : Number($('budget').value), pin: $('pin').value, confirm_live: $('confirmLive').checked,
-                 slots: S.rows.map(r => ({ id: r.id || '', market: r.market, strategy: r.strategy, weight: Number(r.weight) })) };
+                 slots: S.rows.map(r => ({ id: r.id || '', market: r.market, strategy: r.strategy, tf: r.tf || '1d', weight: Number(r.weight) })) };
   S.userMsg = true;
   if (!body.pin) { setMsg('PIN을 입력해 주세요.', 'bad'); $('pin').focus(); return; }
   if (body.mode === 'live' && cur.mode !== 'live' && !body.confirm_live) { setMsg("실거래로 바꾸려면 '실제 돈으로 주문이 나간다'에 체크해 주세요.", 'bad'); return; }
   const accountChanged = body.mode !== cur.mode || (body.mode === 'live' && String(body.budget) !== String(cur.budget === 'all' ? 'all' : Math.round(cur.budget)));
-  const lines = S.rows.map(r => `· ${marketLabel(r.market)} — ${rankedList(r.market).find(x => x.name === r.strategy).label} ${r.weight}%`);
+  const lines = S.rows.map(r => `· ${marketLabel(r.market)} — ${TF(r.tf || "1d").short} · ${rankedList(rkey(r.market, r.tf)).find(x => x.name === r.strategy).label} ${r.weight}%`);
   lines.unshift(`계좌: ${body.mode === 'live' ? (all ? '실거래 (계좌 전액)' : `실거래 (한도 ${won(body.budget)})`) : '모의투자'}`);
-  const willSell = s.slots.filter(x => x.holding && (accountChanged || !S.rows.some(r => r.id === x.id && r.market === x.market && r.strategy === x.strategy.name)));
+  const willSell = s.slots.filter(x => x.holding && (accountChanged || !S.rows.some(r => r.id === x.id && r.market === x.market && r.strategy === x.strategy.name && (r.tf || "1d") === x.tf)));
   if (willSell.length) lines.push('', `바로 매도돼요: ${willSell.map(x => sym(x.market)).join(', ')}`);
   if (body.mode === 'live') lines.push('', '⚠️ 실제 돈으로 업비트에 주문이 나가요.');
   if (!confirm('이렇게 바꿀까요?\n\n' + lines.join('\n'))) return;
@@ -1103,18 +1156,19 @@ $('logout').onclick = async () => { try { await postJSON('/api/logout', {}); } c
 // ---------- 전략 순위 · 비교 · 설명 ----------
 function renderRanking() {
   const body = $('ranks'); body.innerHTML = '';
-  const m = S.sel, rk = ranking(m), s = S.data.status;
+  const key = S.sel, [m, tf] = splitKey(key), rk = ranking(key), s = S.data.status;
   const empty = $('ranksEmpty');
   if (!rk || !rk.results) {
     empty.style.display = 'block';
-    empty.textContent = rk && rk.error ? `⚠️ ${rk.error}` : (m ? `${marketLabel(m)} 순위를 계산하는 중이에요 (10~30초)` : '');
-    if (m && !rk) requestRanking(m);
-    $('rankPeriod').textContent = '종목별 과거 3년 백테스트';
+    empty.textContent = rk && rk.error ? `⚠️ ${rk.error}` : (key ? `${keyLabel(key)} 순위를 계산하는 중이에요 (10~30초)` : '');
+    if (key && !rk) requestRanking(m, tf);
+    $('rankPeriod').textContent = '종목 × 판단 주기별 백테스트';
     return;
   }
   empty.style.display = 'none';
-  $('rankPeriod').textContent = `${marketLabel(m)} · ${rk.from} ~ ${rk.to} (${rk.days}일) · ${rk.rank_by === 'calmar' ? '위험 대비 수익 순' : '총수익률 순'}`;
-  const slot = s && s.slots.find(x => x.market === m), active = slot ? slot.strategy.name : null, medals = ['🥇', '🥈', '🥉'];
+  const span = tf === '1d' ? `${rk.from} ~ ${rk.to} (${rk.days}일)` : `${barLabel(rk.from, tf)} ~ ${barLabel(rk.to, tf)} (${rk.days}봉)`;
+  $('rankPeriod').textContent = `${keyLabel(key)} · ${span} · ${rk.rank_by === 'calmar' ? '위험 대비 수익 순' : '총수익률 순'}`;
+  const slot = s && s.slots.find(x => x.rank_key === key), active = slot ? slot.strategy.name : null, medals = ['🥇', '🥈', '🥉'];
   for (const r of rk.results) {
     const tr = el('tr', { title: r.guide || r.description });
     if (r.name === active) tr.className = 'active';
@@ -1129,8 +1183,8 @@ function renderRanking() {
     cell(tr, '').appendChild(spark(r.curve));
     tr.onclick = () => {
       const row = S.rows.find(x => x.market === m);
-      if (row) { row.strategy = r.name; S.focusRow = S.rows.indexOf(row); touch(); renderEditor(); }
-      else addRow(m, r.name);
+      if (row) { row.strategy = r.name; row.tf = tf; S.focusRow = S.rows.indexOf(row); touch(); renderEditor(); }
+      else addRow(m, r.name, tf);
       $('settings').scrollIntoView({ block: 'start' });
     };
     body.appendChild(tr);
@@ -1147,10 +1201,10 @@ function spark(curve) {
   return root;
 }
 function renderCompare() {
-  const box = $('compareBox'), m = S.sel, rk = ranking(m), s = S.data.status;
+  const box = $('compareBox'), key = S.sel, [m, tf] = splitKey(key), rk = ranking(key), s = S.data.status;
   if (!rk || !rk.results) { box.innerHTML = '<div class="empty">순위가 계산되면 보여요</div>'; $('compareLegend').innerHTML = ''; return; }
-  const slot = s && s.slots.find(x => x.market === m), active = slot ? slot.strategy.name : null;
-  $('compareSub').textContent = `${sym(m)} · 상위 3개 + 사용 중 + 바이앤홀드`;
+  const slot = s && s.slots.find(x => x.rank_key === key), active = slot ? slot.strategy.name : null;
+  $('compareSub').textContent = `${sym(m)}${tf === '1d' ? '' : ' ' + TF(tf).short} · 상위 3개 + 사용 중 + 바이앤홀드`;
   const names = [...new Set([...rk.results.slice(0, 3).map(r => r.name), active, 'buy_and_hold'].filter(Boolean))];
   const chosen = names.map(n => rk.results.find(r => r.name === n)).filter(Boolean);
   const colors = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)'];
@@ -1168,7 +1222,7 @@ function renderCompare() {
     root.append(svg('polyline', { points: pts, fill: 'none', stroke: colors[k], 'stroke-width': r.name === active ? 3 : 1.8,
                                   'stroke-dasharray': r.name === 'buy_and_hold' ? '5 4' : '', 'stroke-linejoin': 'round' }));
   });
-  for (const [txt, anchor, xx] of [[rk.from, 'start', 0], [rk.to, 'end', W - padR]]) {
+  for (const [txt, anchor, xx] of [[barLabel(rk.from, tf), 'start', 0], [barLabel(rk.to, tf), 'end', W - padR]]) {
     const t = svg('text', { x: xx, y: H - 3, 'font-size': 11, fill: 'var(--muted)', 'text-anchor': anchor }); t.textContent = txt; root.append(t);
   }
   box.innerHTML = ''; box.append(root);
@@ -1317,8 +1371,8 @@ function renderSystem() {
 async function refreshStatus() { try { S.data = await getJSON('/api/status'); renderAll(); } catch (e) { setBeat('bad', '파이에 연결할 수 없어요'); } }
 async function refreshCandles() {
   if (!S.sel) return;
-  const m = S.sel;
-  try { const c = await getJSON(`/api/candles?market=${encodeURIComponent(m)}&days=${S.days}`); if (m === S.sel) { S.candles = c; renderCandles(); } } catch (e) {}
+  const key = S.sel, [m, tf] = splitKey(key);
+  try { const c = await getJSON(`/api/candles?market=${encodeURIComponent(m)}&tf=${tf}&days=${S.days}`); if (key === S.sel) { S.candles = c; renderCandles(); } } catch (e) {}
 }
 async function refreshStats() { try { S.stats = await getJSON('/api/stats'); renderStats(); if (S.data && S.data.status) renderSlots(S.data.status); } catch (e) {} }
 async function refreshSystem() { try { S.system = await getJSON('/api/system'); renderSystem(); } catch (e) {} }

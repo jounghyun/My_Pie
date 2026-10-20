@@ -30,6 +30,7 @@ class Strategy:
 
     def __init__(self, params: dict | None = None):
         self.params = {**self.defaults, **(params or {})}
+        self.bar = str(self.params.pop("_bar", "일"))  # 화면 설명에 쓰는 봉 단위 ("일" 또는 "봉")
 
     def plan(self, history: list[dict], today_open: float) -> DayPlan:
         """history: 어제까지의 완성된 일봉 (오래된 것 → 최신). today_open: 오늘 시가."""
