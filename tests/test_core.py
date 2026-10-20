@@ -12,6 +12,7 @@ import math
 import re
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -748,9 +749,10 @@ class TelegramSetupTest(TempDbTest):
 
     def test_link_from_web(self):
         def fake_call(token, method, params=None, timeout=8):
+            old = {"update_id": 6, "message": {"chat": {"id": 99, "type": "private"}, "date": time.time() - 7200}}
+            new = {"update_id": 7, "message": {"chat": {"id": 42, "type": "private"}, "date": time.time()}}
             return {"getMe": {"username": "my_pie_bot"}, "deleteWebhook": True,
-                    "getUpdates": [] if not (params or {}).get("offset") or self.waiting else
-                    [{"update_id": 7, "message": {"chat": {"id": 42, "type": "private"}}}]}[method]
+                    "getUpdates": [old] if self.waiting else [old, new]}[method]
         self.waiting = True
         with mock.patch("mypie.telegram.call", side_effect=fake_call), \
              mock.patch("mypie.telegram.send") as send, \
@@ -759,7 +761,9 @@ class TelegramSetupTest(TempDbTest):
             self.assertEqual(web.telegram_start(self.path, {"token": "bad", "pin": "2468"})[0], 400)
             code, body = web.telegram_start(self.path, {"token": self.TOKEN, "pin": "2468"})
             self.assertEqual((code, body["bot"]), (200, "my_pie_bot"))
-            self.assertFalse(web.telegram_link()[1]["linked"])          # 아직 메시지 안 옴
+            waiting = web.telegram_link()[1]
+            self.assertFalse(waiting["linked"])                           # 2시간 전 메시지는 인정 안 함
+            self.assertIn("1개", waiting["message"])                      # 받은 메시지 수는 알려 줌
             self.waiting = False
             code, body = web.telegram_link()
             self.assertTrue(body["linked"])

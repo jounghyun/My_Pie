@@ -292,7 +292,7 @@ def request_ranking(db_path: str, market: str, tf: str = "1d") -> tuple[int, str
 
 TG_SETTINGS_KEY = "telegram_settings"
 _tg_lock = threading.Lock()
-_tg_pending: dict = {}  # 연결 중인 봇: {"token", "offset", "bot", "expires"} (토큰은 메모리에만)
+_tg_pending: dict = {}  # 연결 중인 봇: {"token", "bot", "expires"} (토큰은 메모리에만)
 TOKEN_PATTERN = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,60}$")
 
 
@@ -329,12 +329,11 @@ def telegram_start(db_path: str, data: dict) -> tuple[int, dict]:
     try:
         me = telegram.call(token, "getMe")
         telegram.call(token, "deleteWebhook")
-        offset = max([u["update_id"] for u in telegram.call(token, "getUpdates")] or [0]) + 1  # 예전 메시지는 무시
     except telegram.TelegramError as e:
         return 400, {"ok": False, "message": f"이 토큰으로 텔레그램에 연결할 수 없어요 ({e})"}
     with _tg_lock:
         _tg_pending.clear()
-        _tg_pending.update(token=token, offset=offset, bot=me["username"], expires=time.time() + 300)
+        _tg_pending.update(token=token, bot=me["username"], expires=time.time() + 300)
     return 200, {"ok": True, "bot": me["username"],
                  "message": f"이제 텔레그램에서 @{me['username']} 을(를) 찾아 아무 메시지나 보내 주세요 (예: /start)."}
 
@@ -347,17 +346,21 @@ def telegram_link() -> tuple[int, dict]:
             return 400, {"ok": False, "message": "연결 시간이 지났어요. 토큰을 넣고 다시 시작해 주세요."}
         token = _tg_pending["token"]
         try:
-            updates = telegram.call(token, "getUpdates", {"offset": _tg_pending["offset"], "timeout": 0})
+            updates = telegram.call(token, "getUpdates", {"timeout": 0})
         except telegram.TelegramError as e:
             return 502, {"ok": False, "message": f"텔레그램 통신 오류 ({e})"}
-        chat = None
-        for update in updates:
-            _tg_pending["offset"] = update["update_id"] + 1
-            message = update.get("message") or {}
-            if message.get("chat", {}).get("type") == "private":
-                chat = message["chat"]["id"]
+        # 연결 시작 전에 보낸 메시지라도 최근 30분 안이면 인정한다 (먼저 보내 놓는 경우가 많아서)
+        private = [u for u in updates if (u.get("message") or {}).get("chat", {}).get("type") == "private"]
+        recent = [u for u in private if u["message"].get("date", 0) >= time.time() - 1800]
+        chat = recent[-1]["message"]["chat"]["id"] if recent else None
         if chat is None:
-            return 200, {"ok": True, "linked": False, "message": f"@{_tg_pending['bot']} 에게 메시지를 기다리는 중…"}
+            seen = f"지금까지 받은 메시지 {len(private)}개" + (" (30분이 지난 것뿐이에요)" if private else "")
+            return 200, {"ok": True, "linked": False,
+                         "message": f"@{_tg_pending['bot']} 에게 메시지를 기다리는 중… {seen}"}
+        try:  # 읽은 메시지는 정리해 둔다
+            telegram.call(token, "getUpdates", {"offset": updates[-1]["update_id"] + 1, "timeout": 0})
+        except telegram.TelegramError:
+            pass
         bot = _tg_pending["bot"]
         write_env({telegram.TOKEN: token, telegram.CHAT: str(chat), BOT_NAME_KEY: bot})
         _tg_pending.clear()
