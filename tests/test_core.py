@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from mypie import auth, backtest, indicators, keys, pin, timeframes, upbit, web
+from mypie import auth, backtest, indicators, keys, pin, reports, timeframes, upbit, web
 from mypie.bot import Bot, validate_slots
 from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
@@ -772,6 +772,54 @@ class TelegramSetupTest(TempDbTest):
             self.assertEqual((self.env["TELEGRAM_BOT_TOKEN"], self.env["TELEGRAM_CHAT_ID"]), (self.TOKEN, "42"))
             self.assertIsNone(web._pending())                            # 기다리던 표시는 지움
             send.assert_called()
+
+
+class ReportTest(TempDbTest):
+    STATUS = {"mode": "paper", "updated_at": "2026-10-21 09:00:05",
+              "account": {"equity": 1_012_345, "return_pct": 1.23, "contributions": 1_000_000, "reserve": 0},
+              "slots": [{"market": "KRW-BTC", "tf_label": "일봉", "weight": 100, "holding": True, "price": 110_000_000,
+                         "return_pct": 1.2, "state_text": "내일 09시에 매도 예정",
+                         "strategy": {"label": "변동성 돌파"}}]}
+
+    def add_trades(self):
+        self.db.add_trade("paper", "KRW-BTC", {"side": "buy", "price": 100_000_000, "volume": 0.01, "krw": 1_000_000,
+                                               "fee": 500, "profit": None})
+        self.db.add_trade("paper", "KRW-BTC", {"side": "sell", "price": 101_000_000, "volume": 0.01, "krw": 1_009_000,
+                                               "fee": 505, "profit": 9_000})
+
+    def test_texts(self):
+        self.add_trades()
+        trades = self.db.trades("paper")
+        self.assertIn("🔵 매도 BTC @101,000,000원", reports.trades_text(trades))
+        self.assertIn("손익 +9,000원", reports.trades_text(trades))
+        status = reports.status_text(self.STATUS)
+        self.assertIn("총 자산 1,012,345원 (+1.23%)", status)
+        self.assertIn("BTC 일봉 · 변동성 돌파", status)
+        daily = reports.daily_text(trades, self.STATUS)
+        self.assertIn("매매 2건 · 확정 손익 +9,000원 (1승 0패)", daily)
+
+    def test_commands(self):
+        self.add_trades()
+        self.db.set_state("status", self.STATUS)
+        self.assertIn("최근 매매 기록", reports.command_reply("/기록", self.db))
+        self.assertIn("최근 매매 기록", reports.command_reply("/trades@my_pie_bot", self.db))
+        self.assertIn("총 자산", reports.command_reply("/status", self.db))
+        self.assertIn("명령어", reports.command_reply("안녕", self.db))       # 모르는 말에는 안내
+
+    def test_morning_report_once_per_day(self):
+        cfg = {section: dict(values) for section, values in DEFAULTS.items()}
+        bot = Bot(cfg, self.db, lambda mode, budget: PaperExecutor(0.0005))
+        sent = []
+        bot.notifier = sent.append
+        self.add_trades()
+        self.db.set_state("status", self.STATUS)
+        with mock.patch("mypie.telegram.load", return_value=("t", "1")):
+            bot._daily_report("2026-10-21")                             # 처음 켰을 때는 안 보냄
+            self.assertEqual(sent, [])
+            bot._daily_report("2026-10-22")                             # 다음 거래일 아침에 보냄
+            bot._daily_report("2026-10-22")                             # 같은 날 두 번은 안 보냄
+        self.assertEqual(len(sent), 1)
+        self.assertIn("아침 리포트", sent[0])
 
 
 class WebLoginTest(TempDbTest):

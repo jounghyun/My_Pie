@@ -23,8 +23,9 @@ import threading
 import time
 import uuid
 from dataclasses import asdict
+from datetime import timedelta
 
-from . import backtest, network, telegram, timeframes, upbit
+from . import backtest, network, reports, telegram, timeframes, upbit
 from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, sync_full
 from .config import load_config
 from .db import Database
@@ -32,7 +33,7 @@ from .history import sync_candles
 from .keys import days_left, load_keys
 from .strategies import STRATEGIES, DayPlan, create_strategy, strategy_params
 from .timeframes import bar_key, next_bar
-from .timeutil import KST, trading_day, ts
+from .timeutil import KST, now_kst, trading_day, ts
 
 log = logging.getLogger("mypie.bot")
 
@@ -141,6 +142,7 @@ class Bot:
         self.prices: dict[str, float] = {}
         self.markets_day: str | None = (db.get_state("markets") or {}).get("day")
         self.key_day: str | None = (db.get_state("key_info") or {}).get("checked")
+        self.report_day: str | None = db.get_state("report_day")
         self.last_snapshot = 0.0
         self.last_exchange_check = 0.0
         self.last_ip_check = 0.0
@@ -218,10 +220,57 @@ class Bot:
         if notify or level == "error":
             self._notify(message)
 
-    def _notify(self, message: str) -> None:
+    def _notify(self, message: str, prefix: str = "🥧 ") -> None:
         """텔레그램 알림. 웹페이지 텔레그램 카드에서 '매매 알림'을 끄면 보내지 않는다."""
         if (self.db.get_state("telegram_settings") or {}).get("notify", True):
-            self.notifier(f"🥧 {message}")
+            self.notifier(prefix + message)
+
+    def _daily_report(self, day: str) -> None:
+        """거래일이 바뀌고 09시 매매가 끝나면 지난 24시간 매매 기록과 지금 상태를 텔레그램으로 보낸다."""
+        if self.report_day == day:
+            return
+        first = self.report_day is None  # 처음 켰을 때는 보내지 않고 날짜만 기억 (재시작마다 오지 않게)
+        self.report_day = day
+        self.db.set_state("report_day", day)
+        if first or not telegram.load():
+            return
+        trades = self.db.trades(self.executor.mode, since=ts(now_kst() - timedelta(days=1)))
+        self._notify(reports.daily_text(trades, self.db.get_state("status")), prefix="")
+
+    def _listen_commands(self) -> None:
+        """텔레그램 명령(/상태, /기록, /도움)에 답한다. 따로 도는 스레드라서 DB 연결도 따로 연다.
+        연결된 내 채팅에서 온 메시지에만 답한다."""
+        db = Database(self.db.path)
+        offset, menu_set = None, False
+        while not self.stop_event.is_set():
+            creds = telegram.load()
+            if not creds:
+                offset = None
+                self.stop_event.wait(30)
+                continue
+            token, chat = creds
+            try:
+                if not menu_set:  # 텔레그램 입력창 메뉴에 명령어 목록을 띄운다
+                    telegram.call(token, "setMyCommands", {"commands": [{"command": c, "description": d}
+                                                                        for c, d in reports.COMMANDS.items()]})
+                    menu_set = True
+                if offset is None:  # 봇이 꺼져 있는 동안 쌓인 메시지에는 답하지 않는다
+                    backlog = telegram.call(token, "getUpdates", {"timeout": 0})
+                    offset = backlog[-1]["update_id"] + 1 if backlog else 0
+                updates = telegram.call(token, "getUpdates", {"offset": offset, "timeout": 25}, timeout=35)
+            except telegram.TelegramError as e:
+                log.debug("텔레그램 명령 확인 실패: %s", e)
+                self.stop_event.wait(15)
+                continue
+            for update in updates:
+                offset = update["update_id"] + 1
+                message = update.get("message") or {}
+                if str(message.get("chat", {}).get("id")) != str(chat):
+                    continue
+                try:
+                    telegram.send(reports.command_reply(message.get("text", ""), db), creds)
+                except telegram.TelegramError as e:
+                    log.warning("텔레그램 답장 실패: %s", e)
 
     def _sstate(self, slot: Slot) -> dict:
         return (self.db.get_state("slot_state") or {}).get(slot.id, {})
@@ -265,6 +314,7 @@ class Bot:
         self._refresh_exchange()
         self._refresh_market_info()
         self._write_status(day)
+        self._daily_report(day)
         if time.monotonic() - self.last_snapshot >= EQUITY_SNAPSHOT_SEC:
             self.db.add_equity(self.executor.mode, 0.0, self.book.equity(self.prices))
             self.last_snapshot = time.monotonic()
@@ -740,6 +790,7 @@ class Bot:
 
     def run(self) -> None:
         self.event("info", f"🥧 봇 시작 · {self._describe()}", notify=True)
+        threading.Thread(target=self._listen_commands, name="telegram-commands", daemon=True).start()
         wait = self.interval
         while not self.stop_event.is_set():
             try:
