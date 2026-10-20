@@ -3,10 +3,11 @@
 실행: python3 -m mypie.web   →   http://<파이 IP>:8000
 
   GET  /api/status   봇 상태, 순위, 기록 (5초마다)
-  GET  /api/candles  차트용 일봉과 매매 지점 (?days=90)
-  GET  /api/stats    성과 통계와 날짜별 손익
+  GET  /api/candles  차트용 일봉과 매매 지점 (?market=KRW-BTC&days=90)
+  GET  /api/stats    성과 통계, 종목별 성적, 날짜별 손익
   GET  /api/system   라즈베리파이 상태 (온도, 메모리, 디스크, 전원)
-  POST /api/control  종목·계좌·한도·전략 변경 (PIN 필요)
+  POST /api/control  포트폴리오(종목·전략·비중)·계좌·한도 변경 (PIN 필요)
+  POST /api/ranking  아직 순위가 없는 종목의 전략 순위 계산 부탁 (PIN 불필요)
 """
 
 import json
@@ -24,6 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import pin
+from .bot import validate_slots
 from .broker import MIN_ORDER_KRW
 from .config import load_config
 from .db import Database
@@ -52,7 +54,7 @@ def _open(db_path: str) -> Database | None:
 def build_payload(db_path: str, max_budget: float) -> dict:
     payload = {
         "server_time": ts(), "status": None, "trades": [], "events": [], "equity": [],
-        "ranking": None, "markets": [], "market_info": None, "key_info": None,
+        "rankings": {}, "markets": [], "market_info": None, "key_info": None, "ranking_request": None,
         "pin_set": False, "pending": None, "live_ready": load_keys() is not None,
         "limits": {"min_budget": MIN_ORDER_KRW, "max_budget": max_budget},
         "strategies": [{"name": c.name, "label": c.label, "description": c.description, "guide": c.guide}
@@ -69,7 +71,8 @@ def build_payload(db_path: str, max_budget: float) -> dict:
         if status:
             payload["equity"] = db.equity_since(status["mode"], ts(now_kst() - timedelta(days=EQUITY_DAYS)))
             payload["pending_order"] = db.get_state("live_pending_order") if status["mode"] == "live" else None
-        payload["ranking"] = db.get_state("ranking")
+        payload["rankings"] = db.get_state("rankings") or {}
+        payload["ranking_request"] = db.get_state("ranking_request")
         payload["markets"] = (db.get_state("markets") or {}).get("list", [])
         payload["market_info"] = db.get_state("market_info")
         payload["key_info"] = db.get_state("key_info")
@@ -80,19 +83,19 @@ def build_payload(db_path: str, max_budget: float) -> dict:
     return payload
 
 
-def build_candles(db_path: str, days: int) -> dict:
-    """차트용: 지금 종목의 일봉 + 그 기간의 매매 지점."""
+def build_candles(db_path: str, market: str, days: int) -> dict:
+    """차트용: 한 종목의 일봉 + 그 기간의 매매 지점."""
     db = _open(db_path)
-    if not db:
-        return {"candles": [], "trades": []}
+    if not db or not MARKET_PATTERN.match(market):
+        return {"market": market, "candles": [], "trades": []}
     try:
         status = db.get_state("status") or {}
-        market = status.get("market", "KRW-BTC")
         candles = db.candle_history(market, days)
         since = f"{candles[0]['day']} 09:00:00" if candles else ""
         trades = db.trades(status.get("mode", "paper"), market, since)
-        return {"market": market, "candles": candles, "today": (db.get_state("market_info") or {}).get("ticker"),
-                "plan": status.get("plan"), "trades": [{k: t[k] for k in ("ts", "side", "price", "profit")} for t in trades]}
+        tickers = (db.get_state("market_info") or {}).get("tickers") or {}
+        return {"market": market, "candles": candles, "today": tickers.get(market),
+                "trades": [{k: t[k] for k in ("ts", "side", "price", "profit")} for t in trades]}
     finally:
         db.close()
 
@@ -127,6 +130,13 @@ def build_stats(db_path: str) -> dict:
         if peak:
             mdd = min(mdd, row["equity"] / peak - 1)
 
+    by_market: dict[str, dict] = {}  # 종목(줄)별 성적
+    for t in sells:
+        m = by_market.setdefault(t["market"], {"round_trips": 0, "wins": 0, "realized": 0.0})
+        m["round_trips"] += 1
+        m["wins"] += (t["profit"] or 0) > 0
+        m["realized"] += t["profit"] or 0
+
     daily: dict[str, float] = {}
     cutoff = (now_kst() - timedelta(days=CALENDAR_DAYS)).strftime("%Y-%m-%d")
     for t in sells:
@@ -149,6 +159,7 @@ def build_stats(db_path: str) -> dict:
         "mdd": mdd,
         "first_trade": trades[0]["ts"] if trades else None,
         "daily": daily,
+        "by_market": by_market,
         "today": now_kst().strftime("%Y-%m-%d"),
     }
 
@@ -214,17 +225,16 @@ def _check_pin(db: Database, pin_input: str) -> tuple[int, str] | None:
 
 
 def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, str]:
-    """종목·계좌·한도·전략 변경 요청. (HTTP 상태 코드, 안내 문구)를 돌려준다."""
-    strategy, market, mode = str(data.get("strategy", "")), str(data.get("market", "")), str(data.get("mode", ""))
-    budget_all = data.get("budget") == "all"  # 실거래: 적용 순간의 업비트 원화 잔고 전부 (여유분 제외)
+    """포트폴리오·계좌·한도 변경 요청. (HTTP 상태 코드, 안내 문구)를 돌려준다."""
+    slots, problem = validate_slots(data.get("slots"))
+    if problem:
+        return 400, problem + "."
+    mode = str(data.get("mode", ""))
+    budget_all = data.get("budget") == "all"  # 실거래: 업비트 계좌 전액
     try:
         budget = 0.0 if budget_all else float(data.get("budget") or 0)
     except (TypeError, ValueError):
         return 400, "투자 한도를 숫자로 입력해 주세요."
-    if strategy not in STRATEGIES:
-        return 400, "알 수 없는 전략이에요."
-    if not MARKET_PATTERN.match(market):
-        return 400, "종목을 다시 골라 주세요."
     if mode not in ("paper", "live"):
         return 400, "계좌를 다시 골라 주세요."
     if mode == "live":
@@ -236,8 +246,7 @@ def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, s
             return 400, "실거래는 '실제 돈으로 거래한다'에 체크해야 바꿀 수 있어요."
     if not Path(db_path).exists():
         return 503, "봇이 아직 시작되지 않았어요."
-    request = {"strategy": strategy, "market": market, "mode": mode,
-               "budget": "all" if budget_all else budget, "requested_at": ts()}
+    request = {"slots": slots, "mode": mode, "budget": "all" if budget_all else budget, "requested_at": ts()}
     with _pin_lock:  # 한 번에 하나씩만 확인해서 무작위 대입을 느리게 만든다
         db = Database(db_path, create=False)
         try:
@@ -249,6 +258,23 @@ def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, s
             db.close()
     log.info("설정 변경 요청: %s", request)
     return 200, "봇에게 전했어요. 10초 안에 적용돼요."
+
+
+def request_ranking(db_path: str, market: str) -> tuple[int, str]:
+    """아직 순위가 없는 종목의 전략 순위를 계산해 달라고 봇에게 부탁한다 (읽기만 하는 일이라 PIN 없이)."""
+    if not MARKET_PATTERN.match(market):
+        return 400, "잘못된 종목이에요."
+    db = _open(db_path)
+    if not db:
+        return 503, "봇이 아직 시작되지 않았어요."
+    try:
+        queue = (db.get_state("ranking_request") or {}).get("markets", [])
+        if market not in queue:
+            queue = (queue + [market])[-10:]
+        db.set_state("ranking_request", {"markets": queue, "requested_at": ts()})
+    finally:
+        db.close()
+    return 200, f"{market} 전략 순위를 계산할게요. 10~30초쯤 걸려요."
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -264,7 +290,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         builders = {
             "/api/status": lambda: build_payload(self.db_path, self.max_budget),
-            "/api/candles": lambda: build_candles(self.db_path, max(20, min(int(query.get("days", ["90"])[0]), 400))),
+            "/api/candles": lambda: build_candles(self.db_path, query.get("market", ["KRW-BTC"])[0],
+                                                  max(20, min(int(query.get("days", ["90"])[0]), 400))),
             "/api/stats": lambda: build_stats(self.db_path),
             "/api/system": lambda: build_system(self.db_path),
         }
@@ -280,7 +307,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain")
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/api/control":
+        route = urlparse(self.path).path
+        if route not in ("/api/control", "/api/ranking"):
             self._send(404, b"not found", "text/plain")
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -291,7 +319,10 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(data, dict):
                 raise ValueError
-            code, message = request_control(self.db_path, data, self.max_budget)
+            if route == "/api/control":
+                code, message = request_control(self.db_path, data, self.max_budget)
+            else:
+                code, message = request_ranking(self.db_path, str(data.get("market", "")))
         except ValueError:
             code, message = 400, "잘못된 요청이에요."
         self._json(code, {"ok": code == 200, "message": message})

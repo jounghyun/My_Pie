@@ -76,6 +76,13 @@ def get_price(market: str) -> float:
     return float(data[0]["trade_price"])
 
 
+def get_prices(markets: list[str]) -> dict[str, float]:
+    """여러 종목의 현재가를 한 번에 {종목: 가격}. 없는 종목이 섞여 있으면 업비트가 요청 전체를 거절한다."""
+    if not markets:
+        return {}
+    return {t["market"]: float(t["trade_price"]) for t in _get("/ticker", {"markets": ",".join(markets)})}
+
+
 def get_tickers(markets: list[str]) -> list[dict]:
     """여러 종목의 시세 요약 (화면용). 24시간 등락률은 전일 종가(09시) 기준."""
     if not markets:
