@@ -72,6 +72,12 @@ class Bot:
         self.warned: set = set()
         self.stop_event = threading.Event()
 
+        pending = db.get_state(LiveBroker.PENDING_KEY)
+        if pending and not self._halted():  # 주문 도중 전원이 나갔거나 봇이 꺼졌던 경우
+            side = "매수" if pending.get("side") == "bid" else "매도"
+            self._halt(f"{pending.get('at')}에 낸 {pending.get('market')} {side} 주문의 결과를 확인하지 못했어요 "
+                       "(정전·재시작). 업비트 앱의 주문 내역에서 체결됐는지 확인하고, 체결됐다면 그 코인은 직접 정리하세요")
+
     @property
     def market(self) -> str:
         return self.settings["market"]
@@ -171,6 +177,7 @@ class Bot:
     def _handle_requests(self) -> None:
         if self.db.get_state("resume_request") is not None:
             self.db.delete_state("resume_request")
+            self.db.delete_state(LiveBroker.PENDING_KEY)
             if self._halted():
                 self._set_state(halted=None)
                 self.event("info", "매매를 다시 시작합니다")

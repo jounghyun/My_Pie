@@ -333,6 +333,27 @@ class BotFlowTest(TempDbTest):
         self.assertIsNone(self.db.get_state("status")["halted"])
         self.assertEqual(self.db.recent_trades()[0]["mode"], "live")
 
+    def test_power_loss_during_order_halts_on_restart(self):
+        self.cfg["general"]["mode"] = "live"
+        self.db.set_state(LiveBroker.PENDING_KEY, {"market": "KRW-BTC", "side": "bid", "at": "2026-10-21 10:00:00"})
+        bot = self.make_bot()                                      # 전원이 다시 들어와서 봇이 켜짐
+        self.assertIn("확인하지 못했어요", bot._halted()["reason"])
+        self.run_day(bot, "2026-10-21", 100, candle("2026-10-20", 90, 120, 80, 100), [125])
+        self.assertEqual(self.client.attempts, 0)                  # 확인 전에는 주문하지 않는다
+
+        self.db.set_state("resume_request", {})
+        self.run_day(bot, "2026-10-21", 100, candle("2026-10-20", 90, 120, 80, 100), [126])
+        self.assertEqual(self.client.attempts, 1)
+        self.assertIsNone(self.db.get_state(LiveBroker.PENDING_KEY))  # 정상 주문이 끝나면 표시도 지워진다
+
+    def test_settings_survive_restart(self):
+        bot = self.make_bot()
+        self.db.set_state("control_request", {"market": "KRW-XRP", "mode": "paper", "budget": 100_000,
+                                              "strategy": "turtle"})
+        self.run_day(bot, "2026-10-21", 100, candle("2026-10-20", 90, 120, 80, 100), [110])
+        rebooted = self.make_bot()
+        self.assertEqual((rebooted.market, rebooted.strategy.name, rebooted.broker.mode), ("KRW-XRP", "turtle", "paper"))
+
     def test_live_budget_all_uses_whole_krw_balance(self):
         self.client.krw = 101_000
         bot = self.make_bot()                                      # 모의투자로 시작

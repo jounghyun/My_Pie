@@ -9,6 +9,7 @@
 import math
 
 from .db import Database
+from .timeutil import ts
 from .upbit import OrderNotPlaced, UpbitClient, UpbitError
 
 MIN_ORDER_KRW = 5000  # 업비트 최소 주문 금액
@@ -75,6 +76,9 @@ class LiveBroker:
 
     mode = "live"
     STATE_KEY = "live_account"
+    # 주문을 내기 직전에 남기고 장부를 고친 뒤 지운다. 봇이 켜질 때 이게 남아 있으면
+    # 주문 도중 전원이 나갔다는 뜻이라 봇이 매매를 멈추고 확인을 요청한다.
+    PENDING_KEY = "live_pending_order"
 
     def __init__(self, db: Database, market: str, budget: float, fee_rate: float, client: UpbitClient):
         self.db = db
@@ -96,6 +100,16 @@ class LiveBroker:
     def account(self) -> dict:
         return dict(self.acct)
 
+    def _place(self, params: dict) -> dict:
+        self.db.set_state(self.PENDING_KEY, {**params, "at": ts()})
+        placed = self.client.place_order(params)
+        order = self.client.wait_order(placed["uuid"])
+        return {**order, "uuid": placed["uuid"]}
+
+    def _done(self) -> None:
+        self._save()
+        self.db.delete_state(self.PENDING_KEY)
+
     def _balance(self, currency: str) -> float:
         try:
             return self.client.balance(currency)
@@ -108,9 +122,7 @@ class LiveBroker:
         order_krw = math.floor(krw_amount / (1 + self.fee_rate))  # 업비트는 수수료를 주문 금액에 더해서 뗀다
         if order_krw < MIN_ORDER_KRW:
             raise UpbitError(f"주문 금액 {order_krw:,}원이 최소 주문 금액보다 적어요 (업비트 원화 잔고를 확인하세요)")
-        placed = self.client.place_order({"market": self.market, "side": "bid", "ord_type": "price",
-                                          "price": str(order_krw)})
-        order = self.client.wait_order(placed["uuid"])
+        order = self._place({"market": self.market, "side": "bid", "ord_type": "price", "price": str(order_krw)})
         volume, funds = _filled(order)
         if volume <= 0:
             raise UpbitError(f"매수 주문이 체결되지 않았어요 (상태: {order.get('state')})")
@@ -123,9 +135,9 @@ class LiveBroker:
             avg_price=(self.acct["avg_price"] * self.acct["coin"] + funds) / coin,
             cost=self.acct["cost"] + spent,
         )
-        self._save()
+        self._done()
         return {"side": "buy", "price": funds / volume, "volume": volume, "krw": spent, "fee": fee,
-                "profit": None, "reason": reason, "uuid": placed["uuid"]}
+                "profit": None, "reason": reason, "uuid": order["uuid"]}
 
     def sell(self, price: float, reason: str = "") -> dict:
         """봇이 산 코인만 시장가 매도 (업비트에 원래 있던 코인은 건드리지 않음)."""
@@ -138,9 +150,7 @@ class LiveBroker:
             self._save()
             return {"side": "sell", "price": price, "volume": 0.0, "krw": 0.0, "fee": 0.0,
                     "profit": -cost, "cost": cost, "reason": f"{reason} (최소 주문 금액 미만 자투리 정리)"}
-        placed = self.client.place_order({"market": self.market, "side": "ask", "ord_type": "market",
-                                          "volume": f"{volume:.8f}"})
-        order = self.client.wait_order(placed["uuid"])
+        order = self._place({"market": self.market, "side": "ask", "ord_type": "market", "volume": f"{volume:.8f}"})
         sold, funds = _filled(order)
         if sold <= 0:
             raise UpbitError(f"매도 주문이 체결되지 않았어요 (상태: {order.get('state')})")
@@ -153,9 +163,9 @@ class LiveBroker:
                          cost=cost - sold_cost if remaining * price >= 1 else 0.0)
         if not self.acct["coin"]:
             self.acct["avg_price"] = 0.0
-        self._save()
+        self._done()
         return {"side": "sell", "price": funds / sold, "volume": sold, "krw": proceeds, "fee": fee,
-                "profit": proceeds - sold_cost, "cost": sold_cost, "reason": reason, "uuid": placed["uuid"]}
+                "profit": proceeds - sold_cost, "cost": sold_cost, "reason": reason, "uuid": order["uuid"]}
 
 
 def _filled(order: dict) -> tuple[float, float]:
