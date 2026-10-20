@@ -450,7 +450,7 @@
       <div class="legend" id="compareLegend"></div>
     </section>
     <section class="card">
-      <h2><span class="ico">📚</span>전략 설명 <small>눌러서 펼치기</small></h2>
+      <h2><span class="ico">📚</span>전략 설명 <small id="guidesSub">눌러서 펼치기</small></h2>
       <div id="guides"></div>
     </section>
   </div>
@@ -576,7 +576,7 @@ const sym = (m) => m.replace('KRW-', '');
 
 const S = { data: null, candles: null, stats: null, system: null, days: 90, offset: 0, sel: null,
             rows: [], editSig: '', dirty: false, mode: 'paper', userMsg: false, focusRow: null,
-            requested: {}, seenTrades: null, seenEvents: null, guidesDone: false };
+            requested: {}, seenTrades: null, seenEvents: null, guidesTf: null };
 
 function marketName(m) {
   const x = S.data && (S.data.markets || []).find(v => v.market === m);
@@ -610,6 +610,19 @@ function leftText(ms) {
   if (ms < 0) ms = 0;
   const h = Math.floor(ms / 3600e3), m = Math.floor(ms % 3600e3 / 60e3);
   return h ? `${h}시간 ${m}분 뒤` : m ? `${m}분 뒤` : '곧';
+}
+// 전략 설명의 자리표시를 판단 주기에 맞게 바꾼다 (strategies/base.py의 render_text와 같은 규칙)
+// 전략 숫자는 '봉 개수'라서 15분봉이면 {N:5} → "5봉(1시간 15분)"
+function periodText(n, tf) {
+  if (tf === '1d') return `${n}일`;
+  const total = n * TF(tf).minutes, d = Math.floor(total / 1440), h = Math.floor(total % 1440 / 60), m = total % 60;
+  return `${n}봉(${[d && `${d}일`, h && `${h}시간`, m && `${m}분`].filter(Boolean).join(' ')})`;
+}
+function fmtGuide(text, tf = '1d') {
+  const daily = tf === '1d';
+  const words = { prev: daily ? '어제' : '직전 봉', cur: daily ? '오늘' : '이번 봉',
+                  next: daily ? '다음 날 아침 9시에' : '다음 봉이 시작될 때', hold: daily ? '하루' : '한 봉' };
+  return (text || '').replace(/\{(N:\d+|prev|cur|next|hold)\}/g, (_, t) => t.startsWith('N:') ? periodText(+t.slice(2), tf) : words[t]);
 }
 
 // ---------- 상태 (5초) ----------
@@ -1066,7 +1079,7 @@ function updateFormView() {
   const row = S.rows[S.focusRow != null && S.rows[S.focusRow] ? S.focusRow : 0];
   const g = row && d ? rankedList(rkey(row.market, row.tf)).find(r => r.name === row.strategy) : null;
   $('pickGuide').hidden = !g;
-  if (g) { $('pickGuide').innerHTML = ''; $('pickGuide').append(el('b', { text: `💡 ${sym(row.market)} · ${g.label} · ` }), g.guide || g.description); }
+  if (g) { $('pickGuide').innerHTML = ''; $('pickGuide').append(el('b', { text: `💡 ${sym(row.market)} · ${g.label} · ` }), fmtGuide(g.guide || g.description, row.tf)); }
   if (d && d.pending) { setMsg('설정을 바꾸는 중이에요…', 'info'); S.userMsg = false; }
   else if (d && !d.pin_set && !S.userMsg) setMsg('설정을 바꾸려면 PIN이 필요해요. 파이에서 python3 -m mypie.pin 을 실행해서 만들어 주세요.', 'info');
   else if (!S.userMsg) setMsg('', '');
@@ -1170,7 +1183,7 @@ function renderRanking() {
   $('rankPeriod').textContent = `${keyLabel(key)} · ${span} · ${rk.rank_by === 'calmar' ? '위험 대비 수익 순' : '총수익률 순'}`;
   const slot = s && s.slots.find(x => x.rank_key === key), active = slot ? slot.strategy.name : null, medals = ['🥇', '🥈', '🥉'];
   for (const r of rk.results) {
-    const tr = el('tr', { title: r.guide || r.description });
+    const tr = el('tr', { title: fmtGuide(r.guide || r.description, tf) });
     if (r.name === active) tr.className = 'active';
     cell(tr, r.rank <= 3 ? medals[r.rank - 1] : r.rank + '위', 'left' + (r.rank <= 3 ? ' medal' : ''));
     const name = cell(tr, r.label, 'left');
@@ -1231,9 +1244,13 @@ function renderCompare() {
     `${r.label}${r.name === active ? ' (사용 중)' : ''} ${pct(r.total_return * 100, 0)}`)));
 }
 function renderGuides(d) {
-  if (S.guidesDone) return;
-  for (const g of d.strategies) $('guides').append(el('details', {}, el('summary', {}, g.label, el('span', { text: ' · ' + g.description })), el('p', { text: g.guide })));
-  S.guidesDone = true;
+  const tf = splitKey(S.sel)[1];  // 지금 보고 있는 줄의 판단 주기에 맞춰 설명한다
+  if (S.guidesTf === tf) return;
+  const box = $('guides'); box.innerHTML = '';
+  for (const g of d.strategies)
+    box.append(el('details', {}, el('summary', {}, g.label, el('span', { text: ' · ' + fmtGuide(g.description, tf) })), el('p', { text: fmtGuide(g.guide, tf) })));
+  $('guidesSub').textContent = `${tf === '1d' ? '일봉' : TF(tf).label} 기준 · 눌러서 펼치기`;
+  S.guidesTf = tf;
 }
 
 // ---------- 시장 ----------

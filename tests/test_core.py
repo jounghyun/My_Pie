@@ -25,6 +25,7 @@ from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
 from mypie.db import Database
 from mypie.strategies import STRATEGIES, create_strategy, strategy_params
+from mypie.strategies.base import render_text
 from mypie.timeutil import KST, trading_day
 from mypie.upbit import OrderRejected, UpbitError, make_token
 
@@ -179,6 +180,15 @@ class StrategyTest(unittest.TestCase):
     def test_every_strategy_has_explanations(self):
         for cls in STRATEGIES.values():
             self.assertTrue(cls.label and cls.description and cls.guide, cls.name)
+
+    def test_explanations_follow_timeframe(self):
+        guide = STRATEGIES["ma_cross"].guide
+        self.assertIn("최근 5일 평균 가격이 20일 평균보다", render_text(guide, 1440))
+        self.assertIn("최근 5봉(1시간 15분) 평균 가격이 20봉(5시간) 평균보다", render_text(guide, 15))
+        self.assertIn("다음 봉이 시작될 때", render_text(STRATEGIES["volatility_breakout"].guide, 60))
+        for cls in STRATEGIES.values():
+            for text in (cls.description, cls.guide):
+                self.assertNotIn("{", render_text(text, 240), cls.name)   # 모르는 자리표시가 남으면 안 된다
 
     def test_volatility_breakout_target(self):
         plan = create_strategy("volatility_breakout", {"k": 0.5}).plan([candle("y", 90, 120, 80, 100)], 100)
