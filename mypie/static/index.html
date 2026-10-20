@@ -1120,7 +1120,8 @@ function renderTelegram(d) {
   const t = d.telegram || { connected: false };
   $('tgOff').hidden = t.connected;
   $('tgOn').hidden = !t.connected;
-  $('tgChip').textContent = t.connected ? `✅ @${t.bot || '내 봇'} 연결됨` : (t.linking ? `⏳ @${t.linking} 연결 중` : '연결 안 됨');
+  $('tgChip').textContent = t.connected ? `✅ @${t.bot || '내 봇'} 연결됨` : (t.linking ? `⏳ @${t.linking} 에게 메시지 기다리는 중` : '연결 안 됨');
+  if (t.linking && !S.tgPolling) pollLink(Date.now());  // 새로고침해도 기다리던 연결을 이어서 확인
   if (t.connected && document.activeElement !== $('tgNotify') && document.activeElement !== $('tgLogin')) {
     $('tgNotify').checked = t.notify; $('tgLogin').checked = t.login;
   }
@@ -1138,11 +1139,12 @@ $('tgStart').onclick = async () => {
   finally { $('tgStart').disabled = false; }
 };
 async function pollLink(started) {
-  if (Date.now() - started > 300000) { tgMsg('시간이 지났어요. 다시 연결 시작을 눌러 주세요.', 'bad'); return; }
+  S.tgPolling = true;
+  if (Date.now() - started > 300000) { S.tgPolling = false; tgMsg('시간이 지났어요. 다시 연결 시작을 눌러 주세요.', 'bad'); return; }
   try {
     const r = await postJSON('/api/telegram/link', {});
-    if (!r.ok) { tgMsg(r.message, 'bad'); return; }
-    if (r.linked) { tgMsg('🎉 ' + r.message, 'ok'); toast('✈️ 텔레그램 연결 완료!', 'info'); refreshStatus(); return; }
+    if (!r.ok) { S.tgPolling = false; tgMsg(r.message, 'bad'); return; }
+    if (r.linked) { S.tgPolling = false; tgMsg('🎉 ' + r.message, 'ok'); toast('✈️ 텔레그램 연결 완료!', 'info'); refreshStatus(); return; }
     tgMsg(r.message, 'info');
   } catch (e) {}
   setTimeout(() => pollLink(started), 3000);
