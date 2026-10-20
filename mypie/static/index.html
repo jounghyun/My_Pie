@@ -1140,7 +1140,7 @@ $('tgStart').onclick = async () => {
 };
 async function pollLink(started) {
   S.tgPolling = true;
-  if (Date.now() - started > 300000) { S.tgPolling = false; tgMsg('시간이 지났어요. 다시 연결 시작을 눌러 주세요.', 'bad'); return; }
+  if (Date.now() - started > 900000) { S.tgPolling = false; tgMsg('시간이 지났어요. 다시 연결 시작을 눌러 주세요.', 'bad'); return; }
   try {
     const r = await postJSON('/api/telegram/link', {});
     if (!r.ok) { S.tgPolling = false; tgMsg(r.message, 'bad'); return; }

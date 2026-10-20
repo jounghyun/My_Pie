@@ -292,7 +292,9 @@ def request_ranking(db_path: str, market: str, tf: str = "1d") -> tuple[int, str
 
 TG_SETTINGS_KEY = "telegram_settings"
 _tg_lock = threading.Lock()
-_tg_pending: dict = {}  # 연결 중인 봇: {"token", "bot", "expires"} (토큰은 메모리에만)
+# 연결을 기다리는 봇 토큰은 .env에 잠깐 적어 둔다 (권한 600). 웹 서버가 재시작돼도 이어서 기다린다
+PENDING_TOKEN, PENDING_BOT, PENDING_UNTIL = "TELEGRAM_PENDING_TOKEN", "TELEGRAM_PENDING_BOT", "TELEGRAM_PENDING_UNTIL"
+LINK_WINDOW_SEC = 900  # 15분 안에 봇에게 메시지를 보내면 연결된다
 TOKEN_PATTERN = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,60}$")
 
 
@@ -300,11 +302,22 @@ def telegram_settings(db: Database) -> dict:
     return {"notify": True, "login": True, **(db.get_state(TG_SETTINGS_KEY) or {})}
 
 
+def _pending() -> dict | None:
+    env = read_env()
+    try:
+        until = float(env.get(PENDING_UNTIL) or 0)
+    except ValueError:
+        until = 0.0
+    if env.get(PENDING_TOKEN) and until > time.time():
+        return {"token": env[PENDING_TOKEN], "bot": env.get(PENDING_BOT, ""), "expires": until}
+    return None
+
+
 def telegram_status(db: Database | None) -> dict:
     env = read_env()
     settings = telegram_settings(db) if db else {"notify": True, "login": True}
     return {"connected": telegram.load() is not None, "bot": env.get(BOT_NAME_KEY) or None,
-            "linking": _tg_pending.get("bot") if _tg_pending.get("expires", 0) > time.time() else None, **settings}
+            "linking": (_pending() or {}).get("bot"), **settings}
 
 
 def _pin_ok(db_path: str, pin_input: str) -> tuple[int, str] | None:
@@ -332,19 +345,18 @@ def telegram_start(db_path: str, data: dict) -> tuple[int, dict]:
     except telegram.TelegramError as e:
         return 400, {"ok": False, "message": f"이 토큰으로 텔레그램에 연결할 수 없어요 ({e})"}
     with _tg_lock:
-        _tg_pending.clear()
-        _tg_pending.update(token=token, bot=me["username"], expires=time.time() + 300)
+        write_env({PENDING_TOKEN: token, PENDING_BOT: me["username"], PENDING_UNTIL: str(int(time.time() + LINK_WINDOW_SEC))})
     return 200, {"ok": True, "bot": me["username"],
-                 "message": f"이제 텔레그램에서 @{me['username']} 을(를) 찾아 아무 메시지나 보내 주세요 (예: /start)."}
+                 "message": f"이제 텔레그램에서 @{me['username']} 을(를) 찾아 아무 메시지나 보내 주세요 (예: /start). 15분 안에요."}
 
 
 def telegram_link() -> tuple[int, dict]:
     """기다리던 봇에게 메시지가 왔으면 그 채팅으로 연결을 마친다 (웹페이지가 몇 초마다 묻는다)."""
     with _tg_lock:
-        if not _tg_pending or _tg_pending["expires"] < time.time():
-            _tg_pending.clear()
+        pending = _pending()
+        if not pending:
             return 400, {"ok": False, "message": "연결 시간이 지났어요. 토큰을 넣고 다시 시작해 주세요."}
-        token = _tg_pending["token"]
+        token, bot = pending["token"], pending["bot"]
         try:
             updates = telegram.call(token, "getUpdates", {"timeout": 0})
         except telegram.TelegramError as e:
@@ -354,16 +366,18 @@ def telegram_link() -> tuple[int, dict]:
         recent = [u for u in private if u["message"].get("date", 0) >= time.time() - 1800]
         chat = recent[-1]["message"]["chat"]["id"] if recent else None
         if chat is None:
-            seen = f"지금까지 받은 메시지 {len(private)}개" + (" (30분이 지난 것뿐이에요)" if private else "")
+            others = len(updates) - len(private)
+            seen = (f"봇이 받은 메시지 {len(private)}개" + (" (30분이 지난 것뿐이에요)" if private else "")
+                    + (f" · 메시지가 아닌 소식 {others}개" if others else ""))
+            left = int(pending["expires"] - time.time()) // 60
             return 200, {"ok": True, "linked": False,
-                         "message": f"@{_tg_pending['bot']} 에게 메시지를 기다리는 중… {seen}"}
+                         "message": f"@{bot} 에게 메시지를 기다리는 중… {seen} · {left}분 남음"}
         try:  # 읽은 메시지는 정리해 둔다
             telegram.call(token, "getUpdates", {"offset": updates[-1]["update_id"] + 1, "timeout": 0})
         except telegram.TelegramError:
             pass
-        bot = _tg_pending["bot"]
-        write_env({telegram.TOKEN: token, telegram.CHAT: str(chat), BOT_NAME_KEY: bot})
-        _tg_pending.clear()
+        write_env({telegram.TOKEN: token, telegram.CHAT: str(chat), BOT_NAME_KEY: bot,
+                   PENDING_TOKEN: "", PENDING_BOT: "", PENDING_UNTIL: ""})
     try:
         telegram.send("🥧 My_Pie와 연결됐어요!\n이제 웹페이지 로그인 코드와 매매 알림이 여기로 와요.")
     except telegram.TelegramError:

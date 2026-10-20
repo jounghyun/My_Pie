@@ -745,7 +745,7 @@ class TelegramSetupTest(TempDbTest):
         super().setUp()
         self.db.set_state(pin.STATE_KEY, pin.make("2468"))
         web._pin_failures.clear()
-        web._tg_pending.clear()
+        self.env = {}  # 가짜 .env
 
     def test_link_from_web(self):
         def fake_call(token, method, params=None, timeout=8):
@@ -756,19 +756,21 @@ class TelegramSetupTest(TempDbTest):
         self.waiting = True
         with mock.patch("mypie.telegram.call", side_effect=fake_call), \
              mock.patch("mypie.telegram.send") as send, \
-             mock.patch("mypie.web.write_env") as write_env:
+             mock.patch("mypie.web.read_env", side_effect=lambda: dict(self.env)), \
+             mock.patch("mypie.web.write_env", side_effect=self.env.update):
             self.assertEqual(web.telegram_start(self.path, {"token": self.TOKEN, "pin": "0000"})[0], 403)
             self.assertEqual(web.telegram_start(self.path, {"token": "bad", "pin": "2468"})[0], 400)
             code, body = web.telegram_start(self.path, {"token": self.TOKEN, "pin": "2468"})
             self.assertEqual((code, body["bot"]), (200, "my_pie_bot"))
+            self.assertEqual(web._pending()["bot"], "my_pie_bot")       # 서버가 재시작돼도 .env에 남아 있음
             waiting = web.telegram_link()[1]
             self.assertFalse(waiting["linked"])                           # 2시간 전 메시지는 인정 안 함
             self.assertIn("1개", waiting["message"])                      # 받은 메시지 수는 알려 줌
             self.waiting = False
             code, body = web.telegram_link()
             self.assertTrue(body["linked"])
-            written = write_env.call_args[0][0]
-            self.assertEqual((written["TELEGRAM_BOT_TOKEN"], written["TELEGRAM_CHAT_ID"]), (self.TOKEN, "42"))
+            self.assertEqual((self.env["TELEGRAM_BOT_TOKEN"], self.env["TELEGRAM_CHAT_ID"]), (self.TOKEN, "42"))
+            self.assertIsNone(web._pending())                            # 기다리던 표시는 지움
             send.assert_called()
 
 
