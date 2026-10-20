@@ -99,8 +99,9 @@ def _with_pin(db_path: str, pin_input: str, key: str, value: dict) -> tuple[int,
 def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, str]:
     """종목·계좌·한도·전략 변경 요청. (HTTP 상태 코드, 안내 문구)를 돌려준다."""
     strategy, market, mode = str(data.get("strategy", "")), str(data.get("market", "")), str(data.get("mode", ""))
+    budget_all = data.get("budget") == "all"  # 실거래: 적용 순간의 업비트 원화 잔고 전부
     try:
-        budget = float(data.get("budget") or 0)
+        budget = 0.0 if budget_all else float(data.get("budget") or 0)
     except (TypeError, ValueError):
         return 400, "투자 한도를 숫자로 입력해 주세요."
     if strategy not in STRATEGIES:
@@ -110,13 +111,13 @@ def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, s
     if mode not in ("paper", "live"):
         return 400, "계좌를 다시 골라 주세요."
     if mode == "live":
-        if not (MIN_ORDER_KRW <= budget <= max_budget):
+        if not budget_all and not (MIN_ORDER_KRW <= budget <= max_budget):
             return 400, f"투자 한도는 {MIN_ORDER_KRW:,}원 ~ {max_budget:,.0f}원 사이로 정해 주세요."
         if load_keys() is None:
             return 400, "업비트 API 키가 아직 없어요. 파이에서 python3 -m mypie.keys 로 먼저 등록하세요."
         if data.get("confirm_live") is not True:
             return 400, "실거래는 '실제 돈으로 거래한다'에 체크해야 바꿀 수 있어요."
-    request = {"strategy": strategy, "market": market, "mode": mode, "budget": budget}
+    request = {"strategy": strategy, "market": market, "mode": mode, "budget": "all" if budget_all else budget}
     failure = _with_pin(db_path, str(data.get("pin", "")), "control_request", request)
     if failure:
         return failure

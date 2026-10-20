@@ -333,6 +333,29 @@ class BotFlowTest(TempDbTest):
         self.assertIsNone(self.db.get_state("status")["halted"])
         self.assertEqual(self.db.recent_trades()[0]["mode"], "live")
 
+    def test_live_budget_all_uses_whole_krw_balance(self):
+        self.client.krw = 101_000
+        bot = self.make_bot()                                      # 모의투자로 시작
+        self.db.set_state("control_request", {"market": "KRW-BTC", "mode": "live", "budget": "all",
+                                              "strategy": "volatility_breakout"})
+        with mock.patch("mypie.bot.load_keys", return_value=("a", "b")), \
+             mock.patch("mypie.upbit.UpbitClient", return_value=self.client):
+            self.run_day(bot, "2026-10-21", 100, candle("2026-10-20", 90, 120, 80, 100), [110])
+        self.assertEqual(bot.broker.mode, "live")
+        self.assertEqual(bot.settings["budget"], 100_490)          # 101,000원 × 99.5%, 10원 단위 내림
+        self.assertEqual(bot.broker.account()["krw"], 100_490)
+
+    def test_profit_is_reinvested_automatically(self):
+        """10만 원이 20만 원이 되면 다음 매수는 알아서 20만 원으로 한다."""
+        self.cfg["general"]["mode"] = "live"
+        bot = self.make_bot()
+        acct = bot.broker.account()
+        bot.broker.acct.update(krw=200_000.0)                      # 매매로 두 배가 됐다고 치고
+        bot.broker._save()
+        self.run_day(bot, "2026-10-21", 100, candle("2026-10-20", 90, 120, 80, 100), [125])
+        self.assertEqual(acct["initial_krw"], 100_000)
+        self.assertEqual(self.client.orders[-1]["price"], str(int(200_000 / 1.0005)))
+
     def test_live_without_keys_falls_back_to_paper(self):
         self.cfg["general"]["mode"] = "live"
         with mock.patch("mypie.bot.load_keys", return_value=None):
@@ -378,6 +401,9 @@ class WebTest(TempDbTest):
             self.assertEqual(web.request_control(self.path, {**live, "budget": 5_000_000, "confirm_live": True},
                                                  1_000_000)[0], 400)
             self.assertEqual(web.request_control(self.path, {**live, "confirm_live": True}, 1_000_000)[0], 200)
+            self.assertEqual(web.request_control(self.path, {**live, "budget": "all", "confirm_live": True},
+                                                 1_000_000)[0], 200)
+            self.assertEqual(self.db.get_state("control_request")["budget"], "all")
 
     def test_rejects_unknown_strategy_and_market(self):
         self.assertEqual(web.request_control(self.path, {**self.request, "strategy": "nope", "pin": "2468"}, 1e6)[0], 400)

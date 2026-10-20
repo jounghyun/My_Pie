@@ -28,6 +28,7 @@ EQUITY_SNAPSHOT_SEC = 300   # 자산 추이 기록 간격
 EXCHANGE_REFRESH_SEC = 60   # 실거래일 때 업비트 실제 잔고 확인 간격
 MAX_BACKOFF_SEC = 300       # 오류가 계속될 때 최대 대기 시간
 DUST_KRW = 1                # 이보다 평가금액이 작으면 보유하지 않은 것으로 본다
+ALL_MARGIN_PERMILLE = 5     # '전액' 한도에서 남겨 둘 여유분 (5/1000 = 0.5%). 수수료는 주문할 때 따로 뺀다
 MARKET_PATTERN = re.compile(r"^KRW-[A-Z0-9]{1,15}$")
 
 
@@ -178,12 +179,17 @@ class Bot:
             self._apply_control(request)
 
     def _apply_control(self, request: dict) -> None:
-        """종목·계좌·한도·전략 변경. 보유 중이면 먼저 판 다음 새 설정으로 다시 시작한다."""
+        """종목·계좌·한도·전략 변경. 보유 중이면 먼저 판 다음 새 설정으로 다시 시작한다.
+
+        budget이 "all"이면 (실거래) 적용하는 순간의 업비트 원화 잔고 전부를 한도로 잡는다.
+        """
+        budget_all = request.get("budget") == "all"
         new = {
             "market": request.get("market") or self.settings["market"],
             "mode": request.get("mode") or self.settings["mode"],
-            "budget": float(request.get("budget") or self.settings["budget"]),
+            "budget": self.settings["budget"] if budget_all else float(request.get("budget") or self.settings["budget"]),
         }
+        budget_all = budget_all and new["mode"] == "live"
         strategy_name = request.get("strategy") or self.strategy.name
         problem = None
         if strategy_name not in STRATEGIES:
@@ -192,7 +198,7 @@ class Bot:
             problem = f"알 수 없는 계좌: {new['mode']}"
         elif not MARKET_PATTERN.match(new["market"]):
             problem = f"잘못된 종목: {new['market']}"
-        elif new["mode"] == "live" and not (MIN_ORDER_KRW <= new["budget"] <= self.max_budget):
+        elif new["mode"] == "live" and not budget_all and not (MIN_ORDER_KRW <= new["budget"] <= self.max_budget):
             problem = f"투자 한도는 {MIN_ORDER_KRW:,}원 ~ {self.max_budget:,.0f}원 사이여야 해요"
         if new["mode"] == "paper":
             new["budget"] = self.settings["budget"]  # 모의투자에서는 한도를 쓰지 않는다
@@ -200,17 +206,19 @@ class Bot:
             self.db.delete_state("control_request")
             self.event("warning", f"설정 변경 실패 · {problem}")
             return
-        settings_changed = new != self.settings
+        settings_changed = new != self.settings or budget_all
         if not settings_changed and strategy_name == self.strategy.name:
             self.db.delete_state("control_request")
             return
 
+        client = None
         if settings_changed and new["mode"] == "live":
             keys = load_keys()
             try:
                 if not keys:
                     raise upbit.UpbitError("API 키가 없어요. 파이에서 python3 -m mypie.keys 로 등록하세요")
-                upbit.UpbitClient(*keys).accounts()  # 키와 허용 IP가 맞는지 미리 확인
+                client = upbit.UpbitClient(*keys)
+                client.accounts()  # 키와 허용 IP가 맞는지 미리 확인
             except upbit.UpbitError as e:
                 self.db.delete_state("control_request")
                 self.event("error", f"실거래로 바꾸지 못했어요 · {e}")
@@ -221,6 +229,18 @@ class Bot:
             self.db.delete_state("control_request")
             self.event("error", "보유 코인을 팔지 못해서 설정을 바꾸지 않았어요")
             return
+
+        if budget_all:  # 팔고 난 뒤의 원화 잔고에서 여유분 0.5%를 남긴 금액 (10원 단위, 최대 한도까지)
+            krw = client.balance("KRW")
+            usable = int(krw) * (1000 - ALL_MARGIN_PERMILLE) // 1000 // 10 * 10
+            if usable < MIN_ORDER_KRW:
+                self.db.delete_state("control_request")
+                self.event("error", f"업비트 원화 잔고가 {krw:,.0f}원이라 실거래를 시작할 수 없어요 (최소 {MIN_ORDER_KRW:,}원)")
+                return
+            new["budget"] = float(min(usable, self.max_budget))
+            if usable > self.max_budget:
+                self.event("warning", f"원화 잔고 {krw:,.0f}원 중 최대 한도 {self.max_budget:,.0f}원까지만 써요 "
+                                      "(config.toml의 max_budget으로 바꿀 수 있어요)")
 
         before = self._describe()
         if settings_changed:

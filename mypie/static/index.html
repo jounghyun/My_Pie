@@ -191,7 +191,9 @@
       <div class="field-label" id="budgetLabel">투자 한도</div>
       <div class="field" id="budgetField">
         <input id="budget" type="number" min="5000" step="10000" inputmode="numeric" aria-label="투자 한도">
-        <span class="hint">원 · 봇은 이 금액 안에서만 사고팔아요. 업비트에 원래 있던 돈과 코인은 건드리지 않아요.</span>
+        <span class="hint">원</span>
+        <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="budgetAll"> 업비트 원화 전액</label>
+        <span class="hint" style="flex-basis:100%" id="budgetHint">봇은 이 금액 안에서만 사고팔아요. 업비트에 원래 있던 다른 코인은 건드리지 않아요.</span>
       </div>
 
       <div class="field-label">전략</div>
@@ -411,6 +413,7 @@ function fillForm(d) {
 
   formMode = cur.mode;
   $('budget').value = Math.round(cur.budget);
+  $('budgetAll').checked = false;
   $('confirmLive').checked = false;
 }
 
@@ -438,6 +441,11 @@ function updateFormView() {
   $('modeLive').disabled = !(d && d.live_ready);
   const live = formMode === 'live';
   $('budgetLabel').hidden = $('budgetField').hidden = !live;
+  const all = $('budgetAll').checked;
+  $('budget').disabled = all;
+  $('budgetHint').textContent = all
+    ? `설정을 적용하는 순간의 업비트 원화 잔고에서 여유분 0.5%를 남기고 한도로 잡아요 (수수료는 주문 때 따로 빼요 · 최대 ${won(d ? d.limits.max_budget : null)}).`
+    : '이 금액으로 시작해서, 번 돈은 다음 매매에 자동으로 다시 들어가요. 업비트에 원래 있던 다른 코인은 건드리지 않아요.';
   $('confirmRow').hidden = !(live && (!s || s.settings.mode !== 'live'));
   const chosen = d ? rankedList(d).find(r => r.name === $('pick').value) : null;
   $('pickGuide').innerHTML = '';
@@ -452,6 +460,7 @@ function touch() { formDirty = true; updateFormView(); }
 $('market').addEventListener('change', touch);
 $('pick').addEventListener('change', touch);
 $('budget').addEventListener('input', touch);
+$('budgetAll').addEventListener('change', touch);
 $('modePaper').addEventListener('click', () => { formMode = 'paper'; touch(); });
 $('modeLive').addEventListener('click', () => { formMode = 'live'; touch(); });
 $('reset').addEventListener('click', () => {
@@ -463,11 +472,12 @@ $('apply').addEventListener('click', async () => {
   const d = last, s = d && d.status;
   if (!s) return;
   const cur = s.settings;
+  const all = formMode === 'live' && $('budgetAll').checked;
   const body = {
-    market: $('market').value, mode: formMode, budget: Number($('budget').value),
+    market: $('market').value, mode: formMode, budget: all ? 'all' : Number($('budget').value),
     strategy: $('pick').value, pin: $('pin').value, confirm_live: $('confirmLive').checked,
   };
-  const changed = body.market !== cur.market || body.mode !== cur.mode || body.strategy !== s.strategy.name ||
+  const changed = all || body.market !== cur.market || body.mode !== cur.mode || body.strategy !== s.strategy.name ||
                   (body.mode === 'live' && body.budget !== Math.round(cur.budget));
   userMsg = true;
   if (!changed) { setMsg('msg', '바뀐 설정이 없어요.', 'info'); return; }
@@ -478,7 +488,7 @@ $('apply').addEventListener('click', async () => {
   const label = rankedList(d).find(r => r.name === body.strategy).label;
   const lines = [
     `종목: ${marketLabel(d, body.market)}`,
-    `계좌: ${body.mode === 'live' ? `실거래 (한도 ${won(body.budget)})` : '모의투자'}`,
+    `계좌: ${body.mode === 'live' ? `실거래 (한도 ${all ? '업비트 원화 전액' : won(body.budget)})` : '모의투자'}`,
     `전략: ${label}`,
   ];
   if (s.holding) lines.push('', `지금 보유 중인 ${s.coin}은(는) 바로 매도돼요.`);
