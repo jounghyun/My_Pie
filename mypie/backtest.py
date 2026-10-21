@@ -13,22 +13,35 @@ WARMUP = 60          # 앞부분은 지표 계산용으로만 쓰고, 모든 전
 CURVE_POINTS = 80    # 화면에 그릴 자산 곡선 점 개수
 
 
+# 전략 시뮬레이션에서 고를 수 있는 기간 (일, 이름). 판단 주기마다 봇이 모아 두는 봉 개수 안에서 고른다
+SIM_PERIODS = {
+    "1d":   [(30, "1달"), (90, "3달"), (180, "6달"), (365, "1년"), (1095, "3년")],
+    "240m": [(7, "1주"), (30, "1달"), (90, "3달"), (180, "6달")],
+    "60m":  [(7, "1주"), (14, "2주"), (30, "1달"), (60, "2달")],
+    "15m":  [(1, "1일"), (3, "3일"), (7, "1주"), (14, "2주")],
+}
+
+
 def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: int = WARMUP,
-             bars_per_year: float = 365) -> dict:
-    """candles: 완성된 봉 (오래된 것 → 최신). 시작 자금 1로 계산한다. bars_per_year: 1년에 봉이 몇 개인지 (일봉 365)."""
+             bars_per_year: float = 365, detail: bool = False) -> dict:
+    """candles: 완성된 봉 (오래된 것 → 최신). 시작 자금 1로 계산한다. bars_per_year: 1년에 봉이 몇 개인지 (일봉 365).
+    detail이면 줄이지 않은 자산 곡선과 매매 지점(fills: 몇 번째 봉에서 사고팔았나)도 돌려준다."""
     cash, coin, cost = 1.0, 0.0, 0.0
     trade_returns: list[float] = []
     curve: list[float] = []
+    fills: list[dict] = []
     peak, mdd, days_holding = 1.0, 0.0, 0
 
     def buy(price: float) -> None:
         nonlocal cash, coin, cost
         coin, cost, cash = cash / ((1 + fee_rate) * price), cash, 0.0
+        fills.append({"i": len(curve), "side": "buy", "price": price})
 
     def sell(price: float) -> None:
         nonlocal cash, coin, cost
         cash = coin * price * (1 - fee_rate)
         trade_returns.append(cash / cost - 1)
+        fills.append({"i": len(curve), "side": "sell", "price": price, "return": cash / cost - 1})
         coin, cost = 0.0, 0.0
 
     for i in range(warmup, len(candles)):
@@ -58,7 +71,7 @@ def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: i
     final = curve[-1] if curve else 1.0
     years = days / bars_per_year
     step = max(1, days // CURVE_POINTS)
-    return {
+    result = {
         "total_return": final - 1,
         # 반년도 안 되는 기간(짧은 분봉)을 1년으로 늘려 계산하면 숫자가 터무니없어져서 비워 둔다
         "cagr": final ** (1 / years) - 1 if years >= 0.5 and final > 0 else None,
@@ -68,6 +81,9 @@ def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: i
         "exposure": days_holding / days if days else 0.0,
         "curve": [round(v, 4) for v in curve[::step]] + ([round(final, 4)] if (days - 1) % step else []),
     }
+    if detail:
+        result["detail"] = {"equity": [round(v, 5) for v in curve], "fills": fills, "holding": bool(coin)}
+    return result
 
 
 def _score(result: dict, rank_by: str) -> float:
@@ -77,14 +93,28 @@ def _score(result: dict, rank_by: str) -> float:
 
 
 def rank_strategies(candles: list[dict], fee_rate: float, rank_by: str = "return", bars_per_year: float = 365,
-                    params: dict | None = None) -> list[dict]:
+                    params: dict | None = None, warmup: int = WARMUP, detail: bool = False) -> list[dict]:
     """모든 전략을 백테스트해서 순위대로 돌려준다. params: {전략이름: 파라미터}."""
     results = []
     for name, cls in STRATEGIES.items():
         strategy = create_strategy(name, (params or {}).get(name))
         results.append({"name": name, "label": cls.label, "description": cls.description, "guide": cls.guide,
-                        **simulate(strategy, candles, fee_rate, bars_per_year=bars_per_year)})
+                        **simulate(strategy, candles, fee_rate, warmup, bars_per_year, detail)})
     results.sort(key=lambda r: _score(r, rank_by), reverse=True)
     for rank, r in enumerate(results, 1):
         r["rank"] = rank
     return results
+
+
+def period_bars(tf_minutes: int, days: int) -> int:
+    return days * 1440 // tf_minutes
+
+
+def rank_period(candles: list[dict], bars: int, fee_rate: float, rank_by: str = "return",
+                bars_per_year: float = 365, params: dict | None = None) -> list[dict]:
+    """최근 bars개 봉 동안만 굴려 본 순위 (전략 시뮬레이션). 그 앞의 봉(최대 WINDOW개)은 지표 계산에만 쓴다."""
+    history = min(WINDOW, len(candles) - bars)
+    if history < WARMUP:
+        raise ValueError("이 기간을 시험하기엔 모아 둔 봉이 모자라요")
+    return rank_strategies(candles[-(bars + history):], fee_rate, rank_by, bars_per_year, params,
+                           warmup=history, detail=True)

@@ -227,6 +227,15 @@
   #ranks tr.active td { background: var(--active); }
   #ranks tr.active td:first-child { box-shadow: inset 3px 0 0 var(--brand); }
   .medal { font-size: 15px; }
+  .simbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) minmax(0, 1.6fr) minmax(0, .7fr); gap: 8px; }
+  .simbar label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+  .simbar select { width: 100%; min-width: 0; color: var(--text); }
+  @media (max-width: 640px) { .simbar { grid-template-columns: 1fr 1fr; } .simbar .wide { grid-column: 1 / -1; grid-row: 2; } }
+  .simline { font-size: 15px; margin: 14px 0 10px; line-height: 1.6; }
+  .simline b { font-weight: 750; }
+  .simtiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  @media (max-width: 760px) { .simtiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .subhead { font-size: 14px; margin: 18px 0 6px; padding-top: 14px; border-top: 1px solid var(--line); }
   .tag { font-size: 11px; font-weight: 700; color: var(--brand); margin-left: 6px; }
   .note { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
 
@@ -433,8 +442,19 @@
 
   <!-- 전략 순위 -->
   <section class="card" id="ranking">
-    <h2><span class="ico">🥇</span>전략 순위 <small id="rankPeriod">종목별 과거 3년 백테스트</small></h2>
-    <div class="pills" id="rankPills"></div>
+    <h2><span class="ico">🥇</span>전략 순위 · 시뮬레이션 <small>과거에 이 전략대로 사고팔았다면?</small></h2>
+    <div class="simbar">
+      <label><span>종목</span><select id="simMarket"></select></label>
+      <label><span>판단 주기</span><select id="simTf"></select></label>
+      <label class="wide"><span>전략 (이 기간 순위)</span><select id="simStrategy"></select></label>
+      <label><span>과거 기간</span><select id="simDays"></select></label>
+    </div>
+    <p class="simline" id="simLine">불러오는 중…</p>
+    <div class="simtiles" id="simTiles"></div>
+    <div class="chart-box" id="simBox"></div>
+    <div class="legend" id="simLegend"></div>
+    <div class="tools"><button type="button" id="simUse">➕ 이 조합을 포트폴리오 설정에 넣기</button></div>
+    <h3 class="subhead" id="rankPeriod">같은 기간 10개 전략 순위</h3>
     <div class="scroll">
       <table>
         <thead><tr><th class="left">순위</th><th class="left">전략</th><th>수익률</th><th>연평균</th><th>최대 낙폭</th><th>승률</th><th>매매</th><th>추이</th></tr></thead>
@@ -442,7 +462,7 @@
       </table>
     </div>
     <div class="empty" id="ranksEmpty"></div>
-    <p class="note">줄을 누르면 설정에서 그 종목의 전략으로 골라져요 (설정에 없는 종목이면 새 줄로 추가) · ⚠️ "과거에 이렇게 했다면?"을 계산한 결과라 앞으로도 같다는 보장은 없어요 · 수수료 0.05% 반영</p>
+    <p class="note">줄을 누르면 위 차트가 그 전략으로 바뀌어요 · ⚠️ "과거에 이렇게 했다면?"을 계산한 결과라 앞으로도 같다는 보장은 없어요 · 수수료 0.05% 반영 · 100만 원으로 시작했다고 치고 계산</p>
   </section>
 
   <div class="row3">
@@ -578,7 +598,7 @@ const sym = (m) => m.replace('KRW-', '');
 
 const S = { data: null, candles: null, stats: null, system: null, range: 1, offset: 0, sel: null,
             rows: [], editSig: '', dirty: false, mode: 'paper', userMsg: false, focusRow: null,
-            requested: {}, seenTrades: null, seenEvents: null, guidesTf: null };
+            requested: {}, seenTrades: null, seenEvents: null, guidesTf: null, sim: null, simSel: null };
 
 function marketName(m) {
   const x = S.data && (S.data.markets || []).find(v => v.market === m);
@@ -668,7 +688,7 @@ function renderAll() {
   document.title = `${won(a.equity)} · My_Pie`;
   $('chartTitle').textContent = `${live ? '실거래' : '모의투자'} · 최근 7일 · 5분 간격`;
   renderEditorIfNeeded();
-  renderRanking();
+  simTick();
   renderCompare();
   renderTrades(d.trades);
   renderEvents(d.events);
@@ -752,11 +772,11 @@ function selectMarket(key) {  // key = "종목|주기" (주기를 빼면 일봉)
   if (S.sel === key) return;
   S.sel = key;
   refreshCandles();
-  if (S.data) renderAll();
+  if (S.data) { simFollow(key); renderGuides(S.data); renderAll(); }
 }
 
 function renderPills() {
-  for (const id of ['chartPills', 'rankPills']) {
+  for (const id of ['chartPills']) {
     const box = $(id); box.innerHTML = '';
     const keys = (S.data.status ? S.data.status.slots.map(x => x.rank_key) : []);
     if (S.sel && !keys.includes(S.sel)) keys.push(S.sel);
@@ -939,7 +959,7 @@ $('daysSeg').addEventListener('click', (ev) => {
   for (const x of $('daysSeg').children) x.setAttribute('aria-pressed', x === b);
   refreshCandles();
 });
-window.addEventListener('resize', () => { if (S.candles) renderCandles(); if (S.data && S.data.status) { renderCompare(); renderEquity(S.data.equity, S.data.status.account.contributions); } });
+window.addEventListener('resize', () => { if (S.candles) renderCandles(); if (S.data && S.data.status) { drawSim(); renderCompare(); renderEquity(S.data.equity, S.data.status.account.contributions); } });
 
 // ---------- 자산 추이 ----------
 function renderEquity(points, base) {
@@ -1053,9 +1073,9 @@ $('equalize').onclick = () => {
   S.rows.forEach((r, i) => { r.weight = each + (i < 100 - each * S.rows.length ? 1 : 0); });
   touch(); renderEditor();
 };
-async function requestRanking(market, tf = '1d') {
+async function requestRanking(market, tf = '1d', refresh = false) {  // refresh: 순위가 있어도 봉을 새로 받아 달라고
   const key = rkey(market, tf);
-  if (!market || ranking(key) || Date.now() - (S.requested[key] || 0) < 120000) return;
+  if (!market || (!refresh && ranking(key)) || Date.now() - (S.requested[key] || 0) < (refresh ? 60000 : 120000)) return;
   S.requested[key] = Date.now();
   try { await postJSON('/api/ranking', { market, tf }); } catch (e) {}
 }
@@ -1183,40 +1203,236 @@ $('tgTest').onclick = () => tgAction('test');
 $('tgOffBtn').onclick = () => { if (confirm('텔레그램 연결을 끊을까요? 로그인 코드와 매매 알림이 멈춰요.')) tgAction('off'); };
 $('logout').onclick = async () => { try { await postJSON('/api/logout', {}); } catch (e) {} location.reload(); };
 
-// ---------- 전략 순위 · 비교 · 설명 ----------
-function renderRanking() {
+// ---------- 전략 시뮬레이션 · 순위 · 비교 · 설명 ----------
+// 고른 종목·판단 주기·전략·과거 기간으로 "그때 이렇게 사고팔았다면?"을 파이가 계산한다 (/api/simulate)
+const SIM_DEFAULT_DAYS = { '1d': 365, '240m': 90, '60m': 30, '15m': 7 };
+const SIM_BASE = 1e6;  // 100만 원으로 시작했다고 치고 보여준다
+const MEDALS = ['🥇', '🥈', '🥉'];
+function josa(word, withBatchim, without) {  // 받침에 맞는 조사 (을/를, 으로/로)
+  const ch = [...String(word)].reverse().find(c => c >= '가' && c <= '힣');
+  const jong = ch ? (ch.charCodeAt(0) - 0xAC00) % 28 : 0;
+  if (without === '로') return jong === 0 || jong === 8 ? '로' : '으로';
+  return jong ? withBatchim : without;
+}
+function tfName(tf) { return tf === '1d' ? '일봉' : TF(tf).label; }
+function simPeriods(tf) {
+  const r = S.sim;
+  if (r && r.tf === tf && r.market === S.simSel.market && r.periods && r.periods.length) return r.periods;
+  return (TF(tf).periods || []).map(p => ({ ...p, ok: true }));
+}
+function simReady() { const r = S.sim, q = S.simSel; return r && r.ready && q && r.market === q.market && r.tf === q.tf; }
+function simFollow(key) {  // 위 가격 차트에서 종목·주기를 고르면 시뮬레이션도 따라간다
+  const [m, tf] = splitKey(key), s = S.data && S.data.status;
+  const slot = s && s.slots.find(x => x.rank_key === key), prev = S.simSel;
+  S.simSel = { market: m, tf, strategy: slot ? slot.strategy.name : (prev ? prev.strategy : ''),
+               days: prev && prev.tf === tf ? prev.days : SIM_DEFAULT_DAYS[tf] };
+  refreshSim();
+}
+function simTick() {  // 5초마다: 처음 한 번 시작하고, 봉을 받는 중이면 조금 뒤 다시 계산
+  if (!S.simSel) { if (S.sel) simFollow(S.sel); return; }
+  const r = S.sim;
+  if (r && (r.need_data || r.stale) && Date.now() - (S.simAt || 0) > 15000 && (S.simTries || 0) < 8) { S.simTries = (S.simTries || 0) + 1; refreshSim(true); }
+}
+async function refreshSim(auto) {
+  const q = S.simSel; if (!q) return;
+  if (!auto) S.simTries = 0;
+  renderSimControls();
+  const id = S.simSeq = (S.simSeq || 0) + 1;
+  if (!auto) $('simLine').textContent = '파이가 계산하는 중이에요… (처음 고른 조합은 몇 초 걸려요)';
+  try {
+    const r = await getJSON(`/api/simulate?market=${encodeURIComponent(q.market)}&tf=${q.tf}&days=${q.days}&strategy=${q.strategy || ''}`);
+    if (id !== S.simSeq) return;  // 그사이에 다른 걸 골랐다
+    S.sim = r; S.simAt = Date.now();
+    if (r.ready) { q.days = r.days; q.strategy = r.detail.name; }
+    if (r.need_data || r.stale) requestRanking(q.market, q.tf, true);
+    renderSim();
+  } catch (e) { if (id === S.simSeq) $('simLine').textContent = '계산하지 못했어요. 잠시 뒤 다시 골라 보세요.'; }
+}
+function renderSimControls() {
+  const q = S.simSel;
+  const ms = $('simMarket'); ms.innerHTML = '';
+  for (const m of marketChoices(q.market)) ms.append(el('option', { value: m, text: `${marketName(m)} (${sym(m)})` }));
+  ms.value = q.market;
+  const ts_ = $('simTf'); ts_.innerHTML = '';
+  for (const t of (S.data.timeframes || [])) ts_.append(el('option', { value: t.id, text: t.label }));
+  ts_.value = q.tf;
+  const ss = $('simStrategy'); ss.innerHTML = '';
+  const list = simReady() ? S.sim.results : S.data.strategies;
+  for (const r of list)
+    ss.append(el('option', { value: r.name, text: r.rank ? `${r.rank <= 3 ? MEDALS[r.rank - 1] : r.rank + '위'} ${r.label} (${pct(r.total_return * 100, 1)})` : r.label }));
+  ss.value = q.strategy || list[0].name;
+  const ds = $('simDays'); ds.innerHTML = '';
+  for (const p of simPeriods(q.tf)) {
+    const o = el('option', { value: p.days, text: `최근 ${p.label}` + (p.ok ? '' : ' (데이터 부족)') });
+    if (!p.ok) o.disabled = true;
+    ds.append(o);
+  }
+  ds.value = q.days;
+}
+$('simMarket').onchange = () => { S.simSel.market = $('simMarket').value; refreshSim(); };
+$('simTf').onchange = () => { const q = S.simSel; q.tf = $('simTf').value; q.days = SIM_DEFAULT_DAYS[q.tf]; refreshSim(); renderGuides(S.data); };
+$('simStrategy').onchange = () => { S.simSel.strategy = $('simStrategy').value; refreshSim(); };
+$('simDays').onchange = () => { S.simSel.days = +$('simDays').value; refreshSim(); };
+$('simUse').onclick = () => {  // 저장은 설정 칸에서 PIN을 넣고 해야 실제로 바뀐다
+  const q = S.simSel; if (!q || !q.strategy) return;
+  const row = S.rows.find(x => x.market === q.market);
+  if (row) { row.strategy = q.strategy; row.tf = q.tf; S.focusRow = S.rows.indexOf(row); touch(); renderEditor(); }
+  else addRow(q.market, q.strategy, q.tf);
+  $('settings').scrollIntoView({ block: 'start' });
+};
+
+function renderSim() {
+  renderSimControls();
+  renderRankTable();
+  renderCompare();
+  const r = S.sim;
+  if (!simReady()) {
+    $('simLine').textContent = r && r.message ? r.message : '계산하는 중이에요…';
+    $('simTiles').innerHTML = ''; $('simBox').innerHTML = ''; $('simLegend').innerHTML = '';
+    return;
+  }
+  const d = r.detail, tf = r.tf;
+  const res = r.results.find(x => x.name === d.name), hold = r.results.find(x => x.name === 'buy_and_hold') || res;
+  const period = simPeriods(tf).find(p => p.days === r.days);
+  const fin = SIM_BASE * (1 + res.total_return), hfin = SIM_BASE * (1 + hold.total_return);
+  const diff = (res.total_return - hold.total_return) * 100, name = marketName(r.market);
+  const line = $('simLine'); line.innerHTML = '';
+  const span = tf === '1d' ? `${r.from} ~ ${r.to}` : `${barLabel(r.from, tf)} ~ ${barLabel(r.to, tf)}`;  // 일봉은 해가 넘어가니 연도까지
+  line.append(`최근 ${period ? period.label : r.days + '일'}(${span}) 동안 ${name}${josa(name, '을', '를')} ${tfName(tf)} `,
+    el('b', { text: `'${res.label}'` }), `${josa(res.label, '으로', '로')} 사고팔았다면 100만 원이 `,
+    el('b', { class: res.total_return > 0 ? 'up' : res.total_return < 0 ? 'down' : '', text: `${won(fin)}(${pct(res.total_return * 100, 1)})` }),
+    '이 됐어요. ' + (d.name === 'buy_and_hold' ? '' :
+      `그냥 사서 들고 있었다면 ${won(hfin)}(${pct(hold.total_return * 100, 1)})이었으니 ` +
+      (Math.abs(diff) < 0.05 ? '거의 같아요. ' : `${Math.abs(diff).toFixed(1)}%p ${diff > 0 ? '더 벌었어요' : '덜 벌었어요'}. `)) +
+    (d.holding ? '마지막엔 코인을 들고 있었어요.' : '마지막엔 현금으로 기다리고 있었어요.') +
+    (r.stale ? ' (최근 봉을 받아 오는 중이라 조금 지난 데이터예요)' : ''));
+  const tiles = $('simTiles'); tiles.innerHTML = '';
+  const tile = (label, v, sub, n) => {
+    const t = el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'v num', text: v }));
+    if (sub) t.append(el('div', { class: 'sub', text: sub }));
+    if (n != null) tone(t.querySelector('.v'), n);
+    tiles.append(t);
+  };
+  tile('100만 원 →', won(fin), pct(res.total_return * 100, 1), res.total_return);
+  tile('그냥 들고 있었다면', won(hfin), pct(hold.total_return * 100, 1), hold.total_return);
+  tile('가장 크게 빠졌을 때', pct(res.mdd * 100, 1), '고점 대비 최대 낙폭', res.mdd < 0 ? -1 : 0);
+  tile('사고판 횟수', `${res.trades}번`, res.win_rate == null ? '아직 판 적 없음' : `이긴 비율 ${Math.round(res.win_rate * 100)}%`);
+  tile('이 기간 순위', `${res.rank}위`, `전략 ${r.results.length}개 중`);
+  drawSim();
+}
+
+function drawSim() {  // 위: 가격 + 사고판 지점 + 들고 있던 구간, 아래: 내 돈 (이 전략 vs 그냥 들고 있기)
+  const box = $('simBox'), r = S.sim;
+  if (!simReady()) return;
+  const d = r.detail, tf = r.tf, n = d.close.length;
+  const W = Math.max(320, box.clientWidth), H = W < 600 ? 320 : 380, padR = 64, padT = 22, gap = 30, xlab = 20;
+  const priceH = Math.round((H - padT - gap - xlab) * 0.56), eqH = H - padT - gap - xlab - priceH, top2 = padT + priceH + gap;
+  const x = (i) => n > 1 ? i / (n - 1) * (W - padR) : 0;
+  let lo = Math.min(...d.close), hi = Math.max(...d.close);
+  for (const f of d.fills) { lo = Math.min(lo, f.price); hi = Math.max(hi, f.price); }
+  const pad = (hi - lo) * 0.1 || hi * 0.01; lo -= pad; hi += pad;
+  const yp = (v) => padT + (hi - v) / (hi - lo) * priceH;
+  let elo = Math.min(1, ...d.equity, ...d.hold), ehi = Math.max(1, ...d.equity, ...d.hold);
+  const epad = (ehi - elo) * 0.08 || 0.01; elo -= epad; ehi += epad;
+  const ye = (v) => top2 + (ehi - v) / (ehi - elo) * eqH;
+  const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': '전략 시뮬레이션 차트' });
+  const text = (tx, xx, yy, attrs = {}) => { const t = svg('text', { x: xx, y: yy, 'font-size': 11, fill: 'var(--muted)', ...attrs }); t.textContent = tx; root.append(t); return t; };
+
+  // 들고 있던 구간 색칠
+  let start = null;
+  const spans = [];
+  for (const f of d.fills) { if (f.side === 'buy') start = f.i; else if (start != null) { spans.push([start, f.i]); start = null; } }
+  if (start != null) spans.push([start, n - 1]);
+  for (const [a, b] of spans)
+    root.append(svg('rect', { x: x(a), y: padT, width: Math.max(2, x(b) - x(a)), height: priceH, fill: 'var(--brand)', opacity: .09 }));
+  // 가격
+  for (const v of [hi - pad, (hi + lo) / 2, lo + pad]) {
+    root.append(svg('line', { x1: 0, x2: W - padR, y1: yp(v), y2: yp(v), stroke: 'var(--line)' }));
+    text(compact(v), W - padR + 6, yp(v) + 4);
+  }
+  root.append(svg('polyline', { points: d.close.map((v, i) => `${x(i).toFixed(1)},${yp(v).toFixed(1)}`).join(' '),
+                                fill: 'none', stroke: 'var(--text)', opacity: .7, 'stroke-width': 1.3, 'stroke-linejoin': 'round' }));
+  for (const f of d.fills) {
+    const cx = x(f.i), buy = f.side === 'buy', yy = buy ? yp(f.price) + 9 : yp(f.price) - 9;
+    const tri = buy ? `${cx},${yy - 6} ${cx - 6},${yy + 5} ${cx + 6},${yy + 5}` : `${cx},${yy + 6} ${cx - 6},${yy - 5} ${cx + 6},${yy - 5}`;
+    root.append(svg('polygon', { points: tri, fill: buy ? 'var(--up)' : 'var(--down)', stroke: 'var(--card)', 'stroke-width': 1.2 }));
+  }
+  text('가격 · ▲샀을 때 ▼팔았을 때 · 색칠한 곳은 코인을 들고 있던 때', 0, 13, { 'font-weight': 600 });
+  // 내 돈
+  for (const v of [ehi - epad, 1, elo + epad]) {
+    root.append(svg('line', { x1: 0, x2: W - padR, y1: ye(v), y2: ye(v), stroke: 'var(--line)', 'stroke-dasharray': v === 1 ? '4 4' : '' }));
+    text(pct((v - 1) * 100, 0), W - padR + 6, ye(v) + 4);
+  }
+  const path = (vals) => vals.map((v, i) => `${x(i).toFixed(1)},${ye(v).toFixed(1)}`).join(' ');
+  root.append(svg('polyline', { points: path(d.hold), fill: 'none', stroke: 'var(--c5)', 'stroke-width': 1.5, 'stroke-dasharray': '5 4' }));
+  root.append(svg('polyline', { points: path(d.equity), fill: 'none', stroke: 'var(--brand)', 'stroke-width': 2.4, 'stroke-linejoin': 'round' }));
+  text('내 돈 (100만 원으로 시작)', 0, top2 - 8, { 'font-weight': 600 });
+  // 아래 날짜
+  const ticks = W < 600 ? 3 : 5;
+  for (let k = 0; k <= ticks; k++) {
+    const i = Math.round((n - 1) * k / ticks);
+    text(barLabel(d.keys[i], tf), x(i), H - 4, { 'text-anchor': k === 0 ? 'start' : k === ticks ? 'end' : 'middle' });
+  }
+  const cross = svg('line', { x1: 0, x2: 0, y1: padT, y2: top2 + eqH, stroke: 'var(--muted)', 'stroke-dasharray': '3 3', opacity: 0 });
+  root.append(cross);
+  box.innerHTML = '';
+  const tip = el('div', { class: 'tip' }); tip.hidden = true;
+  box.append(root, tip);
+  const byBar = {};
+  for (const f of d.fills) (byBar[f.i] = byBar[f.i] || []).push(f);
+  root.addEventListener('pointermove', (ev) => {
+    const rect = root.getBoundingClientRect(), mx = (ev.clientX - rect.left) * W / rect.width;
+    const i = Math.max(0, Math.min(n - 1, Math.round(mx / (W - padR) * (n - 1))));
+    cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('opacity', .7);
+    tip.innerHTML = '';
+    tip.append(el('b', { text: tf === '1d' ? d.keys[i] : barLabel(d.keys[i], tf) + ' 시작' }),
+      el('div', { text: `가격 ${priceText(d.close[i])}` }),
+      el('div', { text: `이 전략 ${won(SIM_BASE * d.equity[i])} (${pct((d.equity[i] - 1) * 100, 1)})` }),
+      el('div', { text: `그냥 들고 있기 ${pct((d.hold[i] - 1) * 100, 1)}` }));
+    for (const f of byBar[i] || []) {
+      const fd = el('div', { text: f.side === 'buy' ? `▲ 삼 ${priceText(f.price)}` : `▼ 팜 ${priceText(f.price)} (${pct(f.return * 100, 1)})` });
+      fd.className = f.side === 'buy' ? 'up' : 'down';
+      tip.append(fd);
+    }
+    tip.hidden = false;
+    tip.style.left = Math.min(x(i) * rect.width / W + 12, rect.width - 200) + 'px';
+    tip.style.top = '24px';
+  });
+  root.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('opacity', 0); });
+  const lg = $('simLegend'); lg.innerHTML = '';
+  lg.append(el('span', {}, el('i', { style: 'background:var(--brand)' }), `${r.results.find(x => x.name === d.name).label} (이 전략)`),
+            el('span', {}, el('i', { style: 'background:var(--c5)' }), '그냥 사서 들고 있기'),
+            el('span', { text: `${d.fills.length}번 사고팖 · 점선 0% = 시작한 돈` }));
+}
+
+function renderRankTable() {
   const body = $('ranks'); body.innerHTML = '';
-  const key = S.sel, [m, tf] = splitKey(key), rk = ranking(key), s = S.data.status;
-  const empty = $('ranksEmpty');
-  if (!rk || !rk.results) {
+  const r = S.sim, empty = $('ranksEmpty');
+  if (!simReady()) {
     empty.style.display = 'block';
-    empty.textContent = rk && rk.error ? `⚠️ ${rk.error}` : (key ? `${keyLabel(key)} 순위를 계산하는 중이에요 (10~30초)` : '');
-    if (key && !rk) requestRanking(m, tf);
-    $('rankPeriod').textContent = '종목 × 판단 주기별 백테스트';
+    empty.textContent = r && r.message ? r.message : '계산하는 중이에요…';
+    $('rankPeriod').textContent = '같은 기간 10개 전략 순위';
     return;
   }
   empty.style.display = 'none';
-  const span = tf === '1d' ? `${rk.from} ~ ${rk.to} (${rk.days}일)` : `${barLabel(rk.from, tf)} ~ ${barLabel(rk.to, tf)} (${rk.days}봉)`;
-  $('rankPeriod').textContent = `${keyLabel(key)} · ${span} · ${rk.rank_by === 'calmar' ? '위험 대비 수익 순' : '총수익률 순'}`;
-  const slot = s && s.slots.find(x => x.rank_key === key), active = slot ? slot.strategy.name : null, medals = ['🥇', '🥈', '🥉'];
-  for (const r of rk.results) {
-    const tr = el('tr', { title: fmtGuide(r.guide || r.description, tf) });
-    if (r.name === active) tr.className = 'active';
-    cell(tr, r.rank <= 3 ? medals[r.rank - 1] : r.rank + '위', 'left' + (r.rank <= 3 ? ' medal' : ''));
-    const name = cell(tr, r.label, 'left');
-    if (r.name === active) name.append(el('span', { class: 'tag', text: '사용 중' }));
-    tone(cell(tr, pct(r.total_return * 100, 1)), r.total_return);
-    tone(cell(tr, r.cagr == null ? '-' : pct(r.cagr * 100, 1)), r.cagr);
-    cell(tr, pct(r.mdd * 100, 1), r.mdd < 0 ? 'down' : '');
-    cell(tr, r.win_rate == null ? '-' : Math.round(r.win_rate * 100) + '%');
-    cell(tr, r.trades + '회');
-    cell(tr, '').appendChild(spark(r.curve));
-    tr.onclick = () => {
-      const row = S.rows.find(x => x.market === m);
-      if (row) { row.strategy = r.name; row.tf = tf; S.focusRow = S.rows.indexOf(row); touch(); renderEditor(); }
-      else addRow(m, r.name, tf);
-      $('settings').scrollIntoView({ block: 'start' });
-    };
+  const tf = r.tf, s = S.data.status, period = simPeriods(tf).find(p => p.days === r.days);
+  const slot = s && s.slots.find(x => x.rank_key === rkey(r.market, tf)), using = slot ? slot.strategy.name : null;
+  $('rankPeriod').textContent = `같은 기간(최근 ${period ? period.label : r.days + '일'}) 10개 전략 순위 · ${r.rank_by === 'calmar' ? '위험 대비 수익 순' : '수익률 순'}`;
+  const guides = Object.fromEntries((S.data.strategies || []).map(g => [g.name, g]));
+  for (const x of r.results) {
+    const g = guides[x.name] || {};
+    const tr = el('tr', { title: fmtGuide(g.guide || g.description || '', tf) });
+    if (x.name === r.detail.name) tr.className = 'active';
+    cell(tr, x.rank <= 3 ? MEDALS[x.rank - 1] : x.rank + '위', 'left' + (x.rank <= 3 ? ' medal' : ''));
+    const nm = cell(tr, x.label, 'left');
+    if (x.name === using) nm.append(el('span', { class: 'tag', text: '사용 중' }));
+    tone(cell(tr, pct(x.total_return * 100, 1)), x.total_return);
+    tone(cell(tr, x.cagr == null ? '-' : pct(x.cagr * 100, 1)), x.cagr);
+    cell(tr, pct(x.mdd * 100, 1), x.mdd < 0 ? 'down' : '');
+    cell(tr, x.win_rate == null ? '-' : Math.round(x.win_rate * 100) + '%');
+    cell(tr, x.trades + '회');
+    cell(tr, '').appendChild(spark(x.curve));
+    tr.onclick = () => { S.simSel.strategy = x.name; refreshSim(); $('simLine').scrollIntoView({ block: 'center', behavior: 'smooth' }); };
     body.appendChild(tr);
   }
 }
@@ -1230,11 +1446,11 @@ function spark(curve) {
                                  fill: 'none', 'stroke-width': 1.5, stroke: curve[curve.length - 1] >= 1 ? 'var(--up)' : 'var(--down)' }));
   return root;
 }
-function renderCompare() {
-  const box = $('compareBox'), key = S.sel, [m, tf] = splitKey(key), rk = ranking(key), s = S.data.status;
-  if (!rk || !rk.results) { box.innerHTML = '<div class="empty">순위가 계산되면 보여요</div>'; $('compareLegend').innerHTML = ''; return; }
-  const slot = s && s.slots.find(x => x.rank_key === key), active = slot ? slot.strategy.name : null;
-  $('compareSub').textContent = `${sym(m)}${tf === '1d' ? '' : ' ' + TF(tf).short} · 상위 3개 + 사용 중 + 바이앤홀드`;
+function renderCompare() {  // 위 시뮬레이션과 같은 종목·주기·기간
+  const box = $('compareBox');
+  if (!simReady()) { box.innerHTML = '<div class="empty">시뮬레이션이 계산되면 보여요</div>'; $('compareLegend').innerHTML = ''; return; }
+  const rk = S.sim, tf = rk.tf, active = rk.detail.name, period = simPeriods(tf).find(p => p.days === rk.days);
+  $('compareSub').textContent = `${sym(rk.market)} ${tfName(tf)} · 최근 ${period ? period.label : rk.days + '일'} · 상위 3개 + 고른 전략 + 바이앤홀드`;
   const names = [...new Set([...rk.results.slice(0, 3).map(r => r.name), active, 'buy_and_hold'].filter(Boolean))];
   const chosen = names.map(n => rk.results.find(r => r.name === n)).filter(Boolean);
   const colors = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)'];
@@ -1258,10 +1474,10 @@ function renderCompare() {
   box.innerHTML = ''; box.append(root);
   const lg = $('compareLegend'); lg.innerHTML = '';
   chosen.forEach((r, k) => lg.append(el('span', {}, el('i', { style: `background:${colors[k]}` }),
-    `${r.label}${r.name === active ? ' (사용 중)' : ''} ${pct(r.total_return * 100, 0)}`)));
+    `${r.label}${r.name === active ? ' (고른 전략)' : ''} ${pct(r.total_return * 100, 0)}`)));
 }
 function renderGuides(d) {
-  const tf = splitKey(S.sel)[1];  // 지금 보고 있는 줄의 판단 주기에 맞춰 설명한다
+  const tf = S.simSel ? S.simSel.tf : splitKey(S.sel)[1];  // 위 시뮬레이션에서 고른 판단 주기에 맞춰 설명한다
   if (S.guidesTf === tf) return;
   const box = $('guides'); box.innerHTML = '';
   for (const g of d.strategies)

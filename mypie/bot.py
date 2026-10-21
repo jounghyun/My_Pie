@@ -747,10 +747,16 @@ class Bot:
             market, _, tf = item.partition("|")
             tf = tf or timeframes.DEFAULT
             key = ranking_key(market, tf)
-            if (MARKET_PATTERN.match(market) and tf in timeframes.TIMEFRAMES
-                    and (rankings.get(key) or {}).get("day") != day):
+            if not (MARKET_PATTERN.match(market) and tf in timeframes.TIMEFRAMES):
+                continue
+            if (rankings.get(key) or {}).get("day") != day:
                 self._rank_market(market, tf, day, rankings)
                 return
+            try:  # 순위는 오늘 것이 있어도 봉은 새로 받아 둔다 (웹페이지 전략 시뮬레이션용)
+                sync_candles(self.db, market, self._bars_wanted(tf), tf)
+            except upbit.UpbitError as e:
+                log.warning("%s %s 봉을 받지 못했어요: %s", market, tf, e)
+            return
         for s in self.slots:
             if (rankings.get(s.rank_key) or {}).get("day") != day:
                 self._rank_market(s.market, s.tf, day, rankings)

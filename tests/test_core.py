@@ -16,7 +16,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -259,6 +259,17 @@ class BacktestTest(unittest.TestCase):
         self.assertEqual([r["rank"] for r in results], list(range(1, len(STRATEGIES) + 1)))
         returns = [r["total_return"] for r in results]
         self.assertEqual(returns, sorted(returns, reverse=True))
+
+    def test_rank_period_runs_only_recent_bars_and_reports_fills(self):
+        candles = [candle(f"d{i:03d}", 100.0 + i, 100.0 + i, 100.0 + i, 100.0 + i) for i in range(300)]
+        results = backtest.rank_period(candles, 90, 0.0005)
+        hold = next(r for r in results if r["name"] == "buy_and_hold")
+        self.assertEqual(len(hold["detail"]["equity"]), 90)
+        self.assertEqual(hold["detail"]["fills"], [{"i": 0, "side": "buy", "price": 310.0}])  # 기간 첫 봉 시가에 산다
+        self.assertAlmostEqual(hold["total_return"], 399 / (310 * 1.0005) - 1)
+        self.assertTrue(hold["detail"]["holding"])
+        with self.assertRaises(ValueError):                             # 지표 계산용 앞부분이 모자라면 못 한다
+            backtest.rank_period(candles[:100], 90, 0.0005)
 
 
 class ValidateSlotsTest(unittest.TestCase):
@@ -727,6 +738,23 @@ class WebTest(TempDbTest):
         data = web.build_candles(self.path, "KRW-ETH", 90)
         self.assertEqual([c["day"] for c in data["candles"]], ["2026-10-19", "2026-10-20"])
 
+    def test_simulation_endpoint(self):
+        start = datetime(2025, 1, 1)
+        prices = [100 + 10 * math.sin(i / 5) for i in range(400)]
+        self.db.upsert_candles("KRW-ETH", [candle((start + timedelta(days=i)).strftime("%Y-%m-%d"), p, p * 1.02, p * 0.98, p)
+                                           for i, p in enumerate(prices)])
+        cfg = {section: dict(values) for section, values in DEFAULTS.items()}
+        sim = web.build_simulation(self.path, cfg, "KRW-ETH", "1d", 90, "rsi")
+        self.assertTrue(sim["ready"])
+        self.assertEqual((sim["days"], sim["detail"]["name"], len(sim["detail"]["close"])), (90, "rsi", 90))
+        self.assertEqual(len(sim["results"]), len(STRATEGIES))
+        self.assertNotIn("detail", sim["results"][0])
+        self.assertEqual([p["ok"] for p in sim["periods"]], [True, True, True, False, False])  # 1년·3년은 봉이 모자람
+        self.assertTrue(sim["stale"])                                   # 마지막 봉이 오래전
+        self.assertEqual(web.build_simulation(self.path, cfg, "KRW-ETH", "1d", 1095, "")["days"], 180)  # 되는 기간 중 가장 긴 것
+        self.assertTrue(web.build_simulation(self.path, cfg, "KRW-SOL", "1d", 90, "")["need_data"])
+        self.assertFalse(web.build_simulation(self.path, cfg, "SOL", "1d", 90, "")["ready"])
+
 
 class AuthTest(TempDbTest):
     def test_code_is_single_use_and_limited(self):
@@ -891,7 +919,7 @@ class WebLoginTest(TempDbTest):
         self.assertIn("로그인 코드", page)                                  # 로그인 화면
         self.assertIn('maxlength="6"', page)                               # 설정한 자릿수가 들어감
         self.assertEqual(self.request("/api/login/send", {})[0], 200)
-        code = re.search(r"코드: (\d{6})", self.sent[-1]).group(1)
+        code = re.match(r"(\d{6}) \(", self.sent[-1]).group(1)             # "123456 (요청한 IP)" 모양
         self.assertEqual(self.request("/api/login/verify", {"code": "x"})[0], 403)
         status, _, cookie = self.request("/api/login/verify", {"code": code})
         self.assertEqual(status, 200)

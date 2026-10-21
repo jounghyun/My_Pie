@@ -4,6 +4,7 @@
 
   GET  /api/status   봇 상태, 순위, 기록 (5초마다)
   GET  /api/candles  차트용 봉과 매매 지점 (?market=KRW-BTC&tf=60m&bars=72  최근 봉 개수)
+  GET  /api/simulate 전략 시뮬레이션 (?market=KRW-BTC&tf=240m&days=90&strategy=ma_cross)
   GET  /api/stats    성과 통계, 종목별 성적, 날짜별 손익
   GET  /api/system   라즈베리파이 상태 (온도, 메모리, 디스크, 전원)
   POST /api/control  포트폴리오(종목·전략·비중)·계좌·한도 변경 (PIN 필요)
@@ -29,13 +30,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import auth, pin, telegram, timeframes
+from . import auth, backtest, pin, telegram, timeframes
 from .bot import validate_slots
 from .broker import MIN_ORDER_KRW
 from .config import load_config
 from .db import Database
 from .keys import load_keys, read_env, write_env
-from .strategies import STRATEGIES
+from .strategies import STRATEGIES, strategy_params
 from .timeutil import now_kst, ts
 
 log = logging.getLogger("mypie.web")
@@ -66,7 +67,8 @@ def build_payload(db_path: str, max_budget: float) -> dict:
         "limits": {"min_budget": MIN_ORDER_KRW, "max_budget": max_budget},
         "strategies": [{"name": c.name, "label": c.label, "description": c.description, "guide": c.guide}
                        for c in STRATEGIES.values()],
-        "timeframes": [{"id": k, "label": v["label"], "short": v["short"], "minutes": v["minutes"]}
+        "timeframes": [{"id": k, "label": v["label"], "short": v["short"], "minutes": v["minutes"],
+                        "periods": [{"days": d, "label": label} for d, label in backtest.SIM_PERIODS[k]]}
                        for k, v in timeframes.TIMEFRAMES.items()],
     }
     db = _open(db_path)
@@ -108,6 +110,60 @@ def build_candles(db_path: str, market: str, count: int, tf: str = "1d") -> dict
                 "trades": [{k: t[k] for k in ("ts", "side", "price", "profit")} for t in trades]}
     finally:
         db.close()
+
+
+SIM_CACHE_SIZE = 12
+_sim_lock = threading.Lock()
+_sim_cache: dict[tuple, list[dict]] = {}
+
+
+def build_simulation(db_path: str, cfg: dict, market: str, tf: str, days: int, strategy: str) -> dict:
+    """전략 시뮬레이션: 한 종목·판단 주기로 최근 days일 동안 10개 전략을 굴려 본 순위와, 고른 전략의 매매 지점.
+    봇이 모아 둔 봉으로 계산한다. 봉이 모자라거나 오래됐으면 need_data / stale로 알려서 봇에게 받아 달라고 하게 한다."""
+    out = {"market": market, "tf": tf, "days": days, "periods": [], "ready": False}
+    if not MARKET_PATTERN.match(market) or tf not in timeframes.TIMEFRAMES:
+        return {**out, "message": "잘못된 종목이에요."}
+    db = _open(db_path)
+    if not db:
+        return {**out, "message": "봇이 아직 시작되지 않았어요."}
+    minutes = timeframes.minutes(tf)
+    periods = backtest.SIM_PERIODS[tf]
+    try:
+        candles = db.candle_history(market, backtest.period_bars(minutes, periods[-1][0]) + backtest.WINDOW, tf)
+    finally:
+        db.close()
+    out["periods"] = [{"days": d, "label": label, "ok": len(candles) - backtest.period_bars(minutes, d) >= backtest.WARMUP}
+                      for d, label in periods]
+    usable = [p["days"] for p in out["periods"] if p["ok"]]
+    if not usable:
+        return {**out, "need_data": True, "message": "과거 봉을 모으는 중이에요 (처음 고른 종목은 1분쯤 걸려요)"}
+    if days not in usable:
+        days = out["days"] = usable[-1]
+    last = candles[-1]["day"]
+    out["stale"] = timeframes.key_to_utc(last) + timedelta(minutes=minutes * 2) < now_kst()  # 끝난 봉이 하나라도 빠졌다
+
+    bars = backtest.period_bars(minutes, days)
+    key = (market, tf, days, last)
+    with _sim_lock:  # 파이 3B에선 몇 초 걸리니 같은 계산을 겹쳐 하지 않는다
+        results = _sim_cache.get(key)
+        if results is None:
+            params = {name: strategy_params(cfg, name) for name in STRATEGIES}
+            results = backtest.rank_period(candles, bars, float(cfg["paper"]["fee_rate"]), cfg["backtest"]["rank_by"],
+                                           timeframes.bars_per_year(tf), params)
+            _sim_cache[key] = results
+            while len(_sim_cache) > SIM_CACHE_SIZE:
+                _sim_cache.pop(next(iter(_sim_cache)))
+    window = candles[-bars:]
+    chosen = next((r for r in results if r["name"] == strategy), results[0])
+    hold = next((r for r in results if r["name"] == "buy_and_hold"), chosen)
+    return {
+        **out, "ready": True, "rank_by": cfg["backtest"]["rank_by"],
+        "from": window[0]["day"], "to": last, "bars": bars,
+        "results": [{k: v for k, v in r.items() if k not in ("detail", "description", "guide")} for r in results],
+        "detail": {"name": chosen["name"], "keys": [c["day"] for c in window], "close": [c["close"] for c in window],
+                   "equity": chosen["detail"]["equity"], "hold": hold["detail"]["equity"],
+                   "fills": chosen["detail"]["fills"], "holding": chosen["detail"]["holding"]},
+    }
 
 
 def build_stats(db_path: str) -> dict:
@@ -443,8 +499,7 @@ def login_send(db_path: str, digits: int, client: dict) -> tuple[int, dict]:
     finally:
         db.close()
     try:
-        telegram.send(f"🔐 My_Pie 로그인 코드: {code}\n5분 안에 웹페이지에 입력하세요.\n"
-                      f"요청한 기기: {client['ip']} · {client['ua']}\n내가 요청한 게 아니면 무시하세요.", creds)
+        telegram.send(f"{code} ({client['ip']})", creds)  # 짧게: 코드와 요청한 기기 IP만
     except telegram.TelegramError as e:
         return 502, {"ok": False, "message": f"텔레그램으로 보내지 못했어요 ({e}). "
                                              "파이에서 python3 -m mypie.telegram --code 로 코드를 받을 수도 있어요."}
@@ -464,7 +519,7 @@ def login_verify(db_path: str, code: str, days: int, client: dict) -> tuple[int,
     if not ok:
         return 403, {"ok": False, "message": message}, None
     try:
-        telegram.send(f"🔓 새 기기에서 My_Pie에 로그인했어요.\n{client['ip']} · {client['ua']}")
+        telegram.send(f"🔓 로그인 ({client['ip']})")
     except telegram.TelegramError:
         pass
     return 200, {"ok": True, "message": "로그인했어요."}, token
@@ -477,6 +532,7 @@ class Handler(BaseHTTPRequestHandler):
     login_enabled = True
     code_digits = 2
     session_days = 30
+    cfg: dict = {}
     COOKIE = "mypie_session"
 
     def _cookie_token(self) -> str | None:
@@ -524,6 +580,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/candles": lambda: build_candles(self.db_path, query.get("market", ["KRW-BTC"])[0],
                                                   max(20, min(int(query.get("bars", query.get("days", ["90"]))[0]), 400)),
                                                   query.get("tf", ["1d"])[0]),
+            "/api/simulate": lambda: build_simulation(self.db_path, self.cfg, query.get("market", ["KRW-BTC"])[0],
+                                                      query.get("tf", ["1d"])[0], int(query.get("days", ["0"])[0] or 0),
+                                                      query.get("strategy", [""])[0]),
             "/api/stats": lambda: build_stats(self.db_path),
             "/api/system": lambda: build_system(self.db_path),
         }
@@ -611,6 +670,7 @@ def main() -> None:
     Handler.login_enabled = bool(cfg["web"]["login"])
     Handler.code_digits = max(2, min(int(cfg["web"]["code_digits"]), 8))
     Handler.session_days = int(cfg["web"]["session_days"])
+    Handler.cfg = cfg
     host, port = cfg["web"]["host"], int(cfg["web"]["port"])
     server = ThreadingHTTPServer((host, port), Handler)
     log.info("모니터링 웹페이지 시작: http://%s:%d", host, port)

@@ -11,8 +11,19 @@ log = logging.getLogger("mypie.history")
 
 def sync_candles(db: Database, market: str, wanted: int, tf: str = "1d") -> dict:
     """완성된 봉을 DB에 저장하고(부족하면 과거로 거슬러 채움), 지금 진행 중인 봉을 돌려준다."""
+    stored = db.candle_history(market, 1, tf)
     latest = upbit.get_candles(market, tf, 200)
     db.upsert_candles(market, latest[1:], tf)
+
+    # 한동안 안 받았던 종목이면 저장된 마지막 봉과 방금 받은 봉 사이가 비어 있으니 거슬러 채운다
+    edge = latest[-1]["day"] if latest else None
+    while stored and edge and edge > stored[0]["day"]:
+        older = upbit.get_candles(market, tf, 200, to=edge)
+        if not older or older[-1]["day"] >= edge:
+            break
+        db.upsert_candles(market, older, tf)
+        edge = older[-1]["day"]
+        time.sleep(0.2)
 
     count, oldest = db.candle_range(market, tf)
     while count < wanted and oldest:
