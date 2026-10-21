@@ -313,6 +313,8 @@ class ValidateSlotsTest(unittest.TestCase):
                                               {"market": "KRW-BTC", "strategy": "macd", "weight": 10}])[1])
         self.assertIsNotNone(validate_slots([])[1])
         self.assertIsNotNone(validate_slots([{"market": "BTC", "strategy": "rsi", "weight": 10}])[1])
+        self.assertIsNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 0}])[1])   # 0%는 지켜보기
+        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": -1}])[1])
 
 
 class TempDbTest(unittest.TestCase):
@@ -556,6 +558,33 @@ class BotFlowTest(TempDbTest):
         self.assertGreater(bot.book.slot("a")["coin"], btc_coin)        # 비중이 늘어난 몫만큼 추가 매수
         self.assertEqual([s.id for s in bot.slots], ["a"])
         self.assertEqual(self.make_bot().settings["slots"][0]["weight"], 80.0)  # 재시작해도 유지
+
+    def test_zero_weight_row_only_watches(self):
+        self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100), ("b", "KRW-ETH", "buy_and_hold", 0))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.market.set("KRW-ETH", self.D1, 100, candle("2026-10-20", 100, 100, 100, 100), 100)
+        self.go(bot, self.D1, steps=2)
+        self.assertEqual(self.trades(), [("buy", "KRW-BTC")])          # 0% 줄은 매수 신호가 나도 안 산다
+        state = {x["id"]: x["state_text"] for x in self.db.get_state("status")["slots"]}
+        self.assertIn("지켜보기", state["b"])
+
+    def test_zero_weight_row_sells_held_coins_and_frees_the_money(self):
+        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 50), ("b", "KRW-ETH", "buy_and_hold", 50))
+        bot = self.make_bot()
+        self.btc(self.D1, 125)                                          # 목표가 120 돌파 → BTC 매수
+        self.market.set("KRW-ETH", self.D1, 100, candle("2026-10-20", 100, 100, 100, 100), 100)
+        self.go(bot, self.D1)
+        self.db.set_state("control_request", {"mode": "paper", "slots": [   # BTC 줄을 0%로 (비중만 바꿔서 바로 팔진 않음)
+            {"id": "a", "market": "KRW-BTC", "strategy": "volatility_breakout", "weight": 0},
+            {"id": "b", "market": "KRW-ETH", "strategy": "buy_and_hold", "weight": 50}]})
+        self.go(bot, self.D1, steps=2)
+        self.assertEqual(self.trades(), [("buy", "KRW-ETH"), ("buy", "KRW-BTC")])  # ETH는 09시, BTC는 장중 돌파
+        self.btc(self.D2, 150, today_open=125, prev=candle(self.D1, 100, 130, 95, 125))
+        self.go(bot, self.D2, steps=2)                                  # 다음 날 09시 매도, 목표가를 넘어도 다시 안 삼
+        self.assertEqual(self.trades()[2:], [("sell", "KRW-BTC")])
+        self.assertEqual(bot.book.slot("a")["krw"], 0.0)                # 판 돈은 대기 원화로
+        self.assertGreaterEqual(bot.book.data["reserve"], self.db.recent_trades()[0]["krw"] - 1)
 
     def test_unknown_market_is_rejected(self):
         self.portfolio(("a", "KRW-BTC", "rsi", 100))

@@ -743,7 +743,7 @@ function renderSlots(s) {
     card.append(el('div', { class: 'bar', style: `background:${slotColor(i)}` }));
     const head = el('div', { class: 'slot-head' },
       el('div', { class: 'slot-name' }, marketName(x.market), el('small', { text: sym(x.market) })),
-      el('span', { class: 'chip', text: `목표 ${x.weight}%` }));
+      el('span', { class: 'chip', text: x.weight > 0 ? `목표 ${x.weight}%` : '👀 0% · 지켜보기' }));
     const nextMs = parseTs(x.next_at).getTime() - (Date.now() + S.offset);
     const when = el('div', { class: 'slot-when' }, el('span', { class: 'chip', text: `⏱ ${x.tf_label}` }),
       ` 다음 판단 ${x.tf === '1d' ? '09:00' : x.next_at.slice(11, 16)} · `, el('span', { 'data-next': x.next_at, text: leftText(nextMs) }));
@@ -1044,7 +1044,7 @@ function renderEditor() {
     ss.value = row.strategy;
     ss.onchange = () => { row.strategy = ss.value; S.focusRow = i; touch(); };
     ss.onfocus = () => { S.focusRow = i; updateFormView(); };
-    const w = el('input', { type: 'number', min: 1, max: 100, step: 1, value: row.weight, inputmode: 'numeric', 'aria-label': '비중' });
+    const w = el('input', { type: 'number', min: 0, max: 100, step: 1, value: row.weight, inputmode: 'numeric', 'aria-label': '비중', title: '0%면 사지 않고 지켜보기만 해요' });
     w.oninput = () => { row.weight = Number(w.value); touch(); };
     const del = el('button', { type: 'button', class: 'del', title: '이 줄 빼기', text: '🗑' });
     del.onclick = () => { S.rows.splice(i, 1); touch(); renderEditor(); };
@@ -1060,17 +1060,18 @@ function addRow(market, strategy, tf = '1d') {
   if (S.rows.some(r => r.market === market)) return;
   const sum = S.rows.reduce((t, r) => t + (Number(r.weight) || 0), 0);
   const first = rankedList(rkey(market, tf))[0];
-  S.rows.push({ id: '', market, tf, strategy: strategy || (first ? first.name : 'volatility_breakout'), weight: Math.max(1, Math.min(20, 100 - sum)) });
+  S.rows.push({ id: '', market, tf, strategy: strategy || (first ? first.name : 'volatility_breakout'), weight: Math.max(0, Math.min(20, 100 - sum)) });  // 합계가 이미 100%면 0%(지켜보기)로 추가
   touch(); requestRanking(market, tf); renderEditor();
 }
 $('addRow').onclick = () => {
   const free = marketChoices().find(m => !S.rows.some(r => r.market === m));
   if (free) addRow(free);
 };
-$('equalize').onclick = () => {
+$('equalize').onclick = () => {  // 0%(지켜보기) 줄은 빼고 나눈다. 전부 0%면 모두에게
   if (!S.rows.length) return;
-  const each = Math.floor(100 / S.rows.length);
-  S.rows.forEach((r, i) => { r.weight = each + (i < 100 - each * S.rows.length ? 1 : 0); });
+  const active = S.rows.some(r => Number(r.weight) > 0) ? S.rows.filter(r => Number(r.weight) > 0) : S.rows;
+  const each = Math.floor(100 / active.length);
+  active.forEach((r, i) => { r.weight = each + (i < 100 - each * active.length ? 1 : 0); });
   touch(); renderEditor();
 };
 async function requestRanking(market, tf = '1d', refresh = false) {  // refresh: 순위가 있어도 봉을 새로 받아 달라고
@@ -1091,7 +1092,7 @@ function updateFormView() {
   S.rows.forEach((r, i) => bar.append(el('i', { style: `width:${Math.max(0, Math.min(100, r.weight))}%;background:${slotColor(i)}` })));
   $('sumText').textContent = sum > 100 ? `⚠️ 합계 ${sum}% · 100% 이하로 줄여 주세요` : `합계 ${sum}% · 대기 원화 ${(100 - sum).toFixed(0)}%`;
   $('sumText').className = sum > 100 ? 'down' : '';
-  $('sumHint').textContent = '비중만 바꾸면 팔지 않고 몫만 다시 나눠요';
+  $('sumHint').textContent = '비중만 바꾸면 팔지 않고 몫만 다시 나눠요 · 0%는 지켜보기만 해요';
   $('modePaper').setAttribute('aria-pressed', S.mode === 'paper');
   $('modeLive').setAttribute('aria-pressed', S.mode === 'live');
   $('modeLive').disabled = !(d && d.live_ready);

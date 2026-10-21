@@ -104,8 +104,8 @@ def validate_slots(raw) -> tuple[list[dict] | None, str | None]:
             return None, f"알 수 없는 전략: {strategy}"
         if tf not in timeframes.TIMEFRAMES:
             return None, f"알 수 없는 판단 주기: {tf}"
-        if not 1 <= weight <= 100:
-            return None, f"{market}의 비중은 1~100% 사이로 넣어 주세요"
+        if not 0 <= weight <= 100:  # 0%는 '지켜보기만 하는 줄' (나중에 비중만 올리면 바로 매매)
+            return None, f"{market}의 비중은 0~100% 사이로 넣어 주세요"
         seen.add(market)
         slots.append({"id": str(item.get("id") or ""), "market": market, "strategy": strategy, "tf": tf,
                       "weight": weight})
@@ -383,6 +383,8 @@ class Bot:
     # 결과를 모르는 주문은 다음 루프의 _recover()가 업비트에 물어서 정리한다.
 
     def _buy(self, slot: Slot, price: float, day: str, reason: str, topup: bool = False) -> bool:
+        if slot.weight <= 0:
+            return False  # 비중 0% 줄은 지켜보기만 한다
         amount = self.book.slot(slot.id)["krw"]
         if amount < MIN_ORDER_KRW:
             if not topup and (slot.id, day) not in self.warned:
@@ -410,6 +412,8 @@ class Bot:
             return True
         trade = self.book.apply_sell(slot.id, *fill, reason)
         self.executor.clear_pending()
+        if slot.weight <= 0:
+            self.book.release(slot.id)  # 비중 0% 줄이 판 돈은 그 줄에 두지 않고 대기 원화로
         self.db.add_trade(self.executor.mode, slot.market, trade)
         pct = trade["profit"] / trade["cost"] * 100 if trade.get("cost") else 0.0
         self.event("info", f"🔵 {self._tag(slot)}매도 {trade['volume']:.8g} @ {trade['price']:,.0f}원 · "
@@ -650,6 +654,8 @@ class Bot:
             return "계획을 세우는 중"
         daily = slot.tf == "1d"
         at = next_bar(slot.tf).astimezone(KST).strftime("%H:%M")
+        if slot.weight <= 0 and not self._holding(slot, price):
+            return "비중 0% · 지켜보기만 해요 (비중을 올리면 이 전략대로 사고팔아요)"
         if self._holding(slot, price):
             if slot.strategy.exit_next_open:
                 return "내일 09시에 매도 예정" if daily else f"다음 봉 시작({at})에 매도 예정"

@@ -114,6 +114,14 @@ class Book:
         return {"side": "sell", "price": funds / volume, "volume": volume, "krw": proceeds, "fee": fee,
                 "profit": proceeds - sold_cost, "cost": sold_cost, "reason": reason}
 
+    def release(self, slot_id: str) -> None:
+        """그 줄의 원화를 대기 원화로 옮긴다 (비중 0% 줄이 코인을 팔았을 때)."""
+        s = self.data["slots"][slot_id]
+        self.data["reserve"] += s["krw"]
+        s["contrib"] -= s["krw"]
+        s["krw"] = 0.0
+        self.save()
+
     def clear_dust(self, slot_id: str) -> None:
         """너무 적어서 팔 수 없는 자투리 코인은 장부에서만 정리한다."""
         s = self.data["slots"][slot_id]
