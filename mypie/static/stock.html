@@ -666,7 +666,7 @@ function renderCandles() {
   const label = (key) => !c.intraday ? key.slice(5) : c.span === '1d' ? key.slice(11) : `${key.slice(5, 10)} ${key.slice(11)}`;
   const tradeKey = (tsStr) => {  // 매매 시각 → 그 매매가 들어간 봉의 키
     if (!c.intraday) return tsStr.slice(0, 10);
-    const [h, m] = tsStr.slice(11, 16).split(':').map(Number), mins = Math.floor((h * 60 + m - 540) / c.minutes) * c.minutes + 540;
+    const [h, m] = tsStr.slice(11, 16).split(":").map(Number), mins = Math.floor((h * 60 + m - 480) / c.minutes) * c.minutes + 480;  // 08:00부터 자른 봉
     return `${tsStr.slice(0, 10)}T${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
   };
   $('chartSub').textContent = `${c.intraday ? c.minutes + '분봉' : '일봉'} · ▲매수 ▼매도`;
@@ -684,6 +684,14 @@ function renderCandles() {
   const x = (i) => step * i + step / 2, y = (v) => padT + (hi - v) / (hi - lo) * priceH;
   const vmax = Math.max(...rows.map(r => r.volume || 0)) || 1;
   const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': '가격 차트' });
+  if (c.intraday) {  // 넥스트레이드 장 전·후(정규장 09:00~15:30 밖)는 배경을 옅게 칠한다
+    const outside = (key) => key.slice(11) < '09:00' || key.slice(11) > '15:30';
+    for (let i = 0; i < n; i++) {
+      if (!outside(rows[i].day) || (i > 0 && outside(rows[i - 1].day))) continue;
+      let j = i; while (j + 1 < n && outside(rows[j + 1].day)) j++;
+      root.append(svg('rect', { x: x(i) - step / 2, y: padT, width: (j - i + 1) * step, height: H - 22 - padT, fill: 'var(--muted)', opacity: .08 }));
+    }
+  }
   for (let k = 0; k <= 4; k++) {
     const v = lo + (hi - lo) * k / 4;
     root.append(svg('line', { x1: 0, x2: W - padR, y1: y(v), y2: y(v), stroke: 'var(--line)' }));
@@ -726,6 +734,7 @@ function renderCandles() {
   });
   root.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('opacity', 0); });
   $('candleLegend').innerHTML = '';
+  if (c.intraday) $('candleLegend').append(el('span', {}, el('i', { style: 'background:var(--muted);opacity:.35;height:10px' }), '옅은 배경 = 넥스트레이드 장 전·후 (봇은 정규장만 매매)'));
   $('candleLegend').append(el('span', {}, el('i', { style: 'background:var(--up)' }), '상승 · ▲매수'), el('span', {}, el('i', { style: 'background:var(--down)' }), '하락 · ▼매도'),
                            el('span', { text: `${x0 ? x0.name : c.symbol} · ${rows[0].day.replace('T', ' ')} ~ ${rows[n - 1].day.replace('T', ' ')}` }));
 }

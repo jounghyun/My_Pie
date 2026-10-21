@@ -422,7 +422,9 @@ class StockWebTest(TempDb):
             def minute_candles(self, symbol, before=None):
                 rows = []
                 for day in (21, 22):
-                    rows.append({"ts": f"2026-10-{day}T08:30", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1})  # 장 전(NXT)은 뺀다
+                    rows.append({"ts": f"2026-10-{day}T08:30", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1})  # 장 전(NXT)도 보여준다
+                    rows.append({"ts": f"2026-10-{day}T20:30", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1})  # 20시 뒤는 없음
+                    rows.append({"ts": f"2026-10-{day}T17:00", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 0})  # 거래 없는 장 후 봉은 뺀다
                     for m in range(12):  # 09:01~09:12에 끝난 1분봉 = 09:00~09:11 시작
                         end = datetime(2026, 10, day, 9, 1) + timedelta(minutes=m)
                         rows.append({"ts": end.strftime("%Y-%m-%dT%H:%M"), "open": 100 + m, "high": 101 + m,
@@ -435,8 +437,8 @@ class StockWebTest(TempDb):
             chart = web.build_stock_intraday(self.stock_path, "005930", "1d")
         web._intraday_cache.clear()
         self.assertEqual([c["day"] for c in chart["candles"]],
-                         ["2026-10-22T09:00", "2026-10-22T09:05", "2026-10-22T09:10"])  # 최근 하루만, 5분씩 묶음
-        first = chart["candles"][0]
+                         ["2026-10-22T08:25", "2026-10-22T09:00", "2026-10-22T09:05", "2026-10-22T09:10"])  # 최근 하루만, 08:00부터 5분씩
+        first = chart["candles"][1]                                       # 정규장 첫 5분봉 (09:00~09:05)
         self.assertEqual((first["open"], first["close"], first["volume"]), (100, 104.5, 50))
         with mock.patch("mypie.toss.load_credentials", return_value=None):
             self.assertIn("키", web.build_stock_intraday(self.stock_path, "005930", "1w")["message"])

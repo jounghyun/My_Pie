@@ -281,7 +281,8 @@ _intraday_cache: dict[tuple, tuple[float, dict]] = {}
 
 
 def build_stock_intraday(stock_db: str, symbol: str, span: str) -> dict:
-    """주식 차트 1일·1주: 토스증권에서 1분봉을 받아 5분·30분봉으로 묶는다 (정규장 09:00~15:30만).
+    """주식 차트 1일·1주: 토스증권에서 1분봉을 받아 5분·30분봉으로 묶는다.
+    넥스트레이드 장 전·후까지 08:00~20:00을 보여준다 (봇이 사고파는 건 정규장 09:00~15:20뿐).
     토큰은 주식 봇 DB에 저장된 것을 같이 쓰고, 같은 차트는 1분 동안 다시 받지 않는다."""
     out = {"symbol": symbol, "span": span, "intraday": True, "candles": [], "trades": []}
     if not STOCK_SYMBOL.match(symbol) or span not in INTRADAY_SPANS:
@@ -304,7 +305,7 @@ def build_stock_intraday(stock_db: str, symbol: str, span: str) -> dict:
             rows, before = client.minute_candles(symbol, before)
             for r in rows:
                 start = datetime.fromisoformat(r["ts"]) - timedelta(minutes=1)  # 1분봉 시각은 끝난 시각
-                if "09:00" <= start.strftime("%H:%M") <= "15:30":
+                if "08:00" <= start.strftime("%H:%M") < "20:00":
                     bars[start] = r
             if len({t.date() for t in bars}) > days or not rows or not before:
                 break
@@ -312,7 +313,7 @@ def build_stock_intraday(stock_db: str, symbol: str, span: str) -> dict:
         candles: dict[str, dict] = {}
         for start in sorted(t for t in bars if t.date() in keep):
             r = bars[start]
-            open_at = start.replace(hour=9, minute=0)
+            open_at = start.replace(hour=8, minute=0)  # 08:00부터 5분·30분씩 자른다
             bucket = open_at + timedelta(minutes=(start - open_at).seconds // 60 // minutes * minutes)
             key = bucket.strftime("%Y-%m-%dT%H:%M")
             c = candles.get(key)
@@ -328,7 +329,9 @@ def build_stock_intraday(stock_db: str, symbol: str, span: str) -> dict:
         return {**out, "message": str(e)}
     finally:
         db.close()
-    result = {**out, "minutes": minutes, "candles": list(candles.values()),
+    # 정규장 밖(넥스트레이드 장 전·후)은 실제로 거래된 봉만 남긴다. 넥스트레이드에 없는 종목(ETF 등)은 정규장만 보인다
+    shown = [c for c in candles.values() if "09:00" <= c["day"][11:] <= "15:30" or c["volume"] > 0]
+    result = {**out, "minutes": minutes, "candles": shown,
               "trades": [{k: t[k] for k in ("ts", "side", "price", "profit", "volume")} for t in trades]}
     with _intraday_lock:
         _intraday_cache[(symbol, span)] = (time.monotonic(), result)
