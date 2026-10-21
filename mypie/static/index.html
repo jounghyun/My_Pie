@@ -445,7 +445,7 @@ function renderDonut(s) {
 }
 
 function holdLine(text, n) {  // 카드의 수익률·손익 아래 '(바이앤홀드 …)' 한 줄
-  const d = el('div', { class: 'sub num hold-line', text: text || '(바이앤홀드 -)' });
+  const d = el('div', { class: 'sub num hold-line', text: text || '(-)', title: '괄호 안 = 같은 돈을 같은 때 넣고 그냥 들고 있었다면 (바이앤홀드)' });
   tone(d, n);
   return d;
 }
@@ -486,8 +486,8 @@ function renderSlots(s) {
       : el('div', { class: 'tile' }, el('div', { class: 'label', text: '원화 몫' }), el('div', { class: 'v num', text: won(x.book.krw) }));
     const retTile = el('div', { class: 'tile' }, el('div', { class: 'label', text: m ? `줄 수익률 · ${m.wins}승 ${m.round_trips - m.wins}패` : '줄 수익률' }), ret);
     // 같은 돈을 같은 때 넣고 그냥 들고 있었다면 (바이앤홀드)
-    retTile.append(holdLine(x.hold_return_pct == null ? null : `(바이앤홀드 ${pct(x.hold_return_pct)})`, x.hold_return_pct));
-    right.append(holdLine(x.hold_pnl == null ? null : `(바이앤홀드 ${signedWon(x.hold_pnl)})`, x.hold_pnl));
+    retTile.append(holdLine(x.hold_return_pct == null ? null : `(${pct(x.hold_return_pct)})`, x.hold_return_pct));
+    right.append(holdLine(x.hold_pnl == null ? null : `(${signedWon(x.hold_pnl)})`, x.hold_pnl));
     const foot = el('div', { class: 'slot-foot' }, retTile, right);
     const wbar = el('div', { class: 'wbar', title: `실제 ${x.actual_weight.toFixed(1)}% / 목표 ${x.weight}%` },
       el('i', { style: `width:${Math.min(100, x.actual_weight)}%;background:${slotColor(i)}` }), el('b', { style: `left:${Math.min(100, x.weight)}%` }));

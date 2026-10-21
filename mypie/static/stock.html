@@ -368,7 +368,7 @@ function renderEquity(points, base) {
 
 // ---------- 종목 계좌 카드 ----------
 function holdLine(text, n) {  // 카드의 수익률·손익 아래 '(바이앤홀드 …)' 한 줄: 같은 돈을 같은 때 넣고 그냥 들고 있었다면
-  const d = el('div', { class: 'sub num hold-line', text: text || '(바이앤홀드 -)' });
+  const d = el('div', { class: 'sub num hold-line', text: text || '(-)', title: '괄호 안 = 같은 돈을 같은 때 넣고 그냥 들고 있었다면 (바이앤홀드)' });
   tone(d, n);
   return d;
 }
@@ -399,9 +399,9 @@ function renderSlots(s) {
     card.append(el('div', { class: 'slot-foot' },
       el('div', { class: 'tile' }, el('div', { class: 'label', text: '💵 잔액 (살 돈)' }), el('div', { class: 'v num', text: won(x.cash) })),
       el('div', { class: 'tile' }, el('div', { class: 'label', text: x.holding ? `평가 손익 ${pct(x.unrealized_pct, 1)}` : '주식 평가금액' }), unr,
-         holdLine(x.hold_pnl == null ? null : `(바이앤홀드 ${signedWon(x.hold_pnl)})`, x.hold_pnl)),
+         holdLine(x.hold_pnl == null ? null : `(${signedWon(x.hold_pnl)})`, x.hold_pnl)),
       el('div', { class: 'tile' }, el('div', { class: 'label', text: '계좌 수익률' }), ret,
-         holdLine(x.hold_return_pct == null ? null : `(바이앤홀드 ${pct(x.hold_return_pct)})`, x.hold_return_pct)),
+         holdLine(x.hold_return_pct == null ? null : `(${pct(x.hold_return_pct)})`, x.hold_return_pct)),
       el('div', { class: 'tile' }, el('div', { class: 'label', text: '넣은 돈' }), el('div', { class: 'v num', text: won(x.contrib) }))));
     const acts = el('div', { class: 'slot-actions' });
     const panel = el('div');
