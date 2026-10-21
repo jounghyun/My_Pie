@@ -1022,6 +1022,22 @@ function marketChoices(current) {
   if (current && !list.includes(current)) list.unshift(current);
   return list;
 }
+function fillMarketSelect(sel, current, used = new Set()) {  // 거래대금 상위 30개, 그 아래 나머지 전부 가나다순
+  sel.innerHTML = '';
+  const all = (S.data.markets || []).map(m => m.market);
+  const names = Object.fromEntries((S.data.markets || []).map(m => [m.market, m.name]));
+  const option = (m) => { const o = el('option', { value: m, text: `${names[m] || marketName(m)} (${sym(m)})` }); o.disabled = used.has(m); return o; };
+  for (const m of marketChoices(current)) if (!all.includes(m)) sel.append(option(m));  // 목록에 없는 줄 종목
+  const groups = [['거래대금 상위 30', all.slice(0, 30)],
+                  ['나머지 (가나다순)', all.slice(30).sort((a, b) => names[a].localeCompare(names[b], 'ko'))]];
+  for (const [label, list] of groups) {
+    if (!list.length) continue;
+    const g = el('optgroup', { label });
+    list.forEach(m => g.append(option(m)));
+    sel.append(g);
+  }
+  sel.value = current;
+}
 function renderEditor() {
   const box = $('editor'); box.innerHTML = '';
   box.append(el('div', { class: 'erow ehead' }, el('span'), el('span', { text: '종목' }), el('span', { text: '판단 주기' }),
@@ -1030,12 +1046,7 @@ function renderEditor() {
     row.tf = row.tf || '1d';
     const used = new Set(S.rows.filter((_, j) => j !== i).map(r => r.market));
     const ms = el('select', { 'aria-label': '종목' });
-    for (const m of marketChoices(row.market)) {
-      const opt = el('option', { value: m, text: `${marketName(m)} (${sym(m)})` });
-      if (used.has(m)) opt.disabled = true;
-      ms.append(opt);
-    }
-    ms.value = row.market;
+    fillMarketSelect(ms, row.market, used);
     ms.onchange = () => { row.market = ms.value; touch(); requestRanking(row.market, row.tf); renderEditor(); };
     const ts_ = el('select', { 'aria-label': '판단 주기', class: 'tfsel', title: '이 주기의 봉이 바뀔 때마다 계획을 새로 세워요' });
     for (const t of (S.data.timeframes || [])) ts_.append(el('option', { value: t.id, text: t.label }));
@@ -1261,9 +1272,7 @@ async function refreshSim(auto) {
 }
 function renderSimControls() {
   const q = S.simSel;
-  const ms = $('simMarket'); ms.innerHTML = '';
-  for (const m of marketChoices(q.market)) ms.append(el('option', { value: m, text: `${marketName(m)} (${sym(m)})` }));
-  ms.value = q.market;
+  fillMarketSelect($('simMarket'), q.market);
   const ts_ = $('simTf'); ts_.innerHTML = '';
   for (const t of (S.data.timeframes || [])) ts_.append(el('option', { value: t.id, text: t.label }));
   ts_.value = q.tf;

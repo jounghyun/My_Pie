@@ -151,14 +151,13 @@ def get_candles(market: str, tf: str = "1d", count: int = 200, to: str | None = 
     ]
 
 
-def get_krw_markets(limit: int = 30) -> list[dict]:
-    """원화 마켓을 24시간 거래대금 순으로."""
+def get_krw_markets(limit: int | None = 30) -> list[dict]:
+    """원화 마켓을 24시간 거래대금 순으로 (limit=None이면 전부)."""
     markets = [m for m in _get("/market/all", {"isDetails": "false"}) if m["market"].startswith("KRW-")]
     names = {m["market"]: m["korean_name"] for m in markets}
     tickers = _get("/ticker", {"markets": ",".join(names)})
     tickers.sort(key=lambda t: t.get("acc_trade_price_24h") or 0, reverse=True)
-    return [{"market": t["market"], "name": names[t["market"]], "volume_24h": t.get("acc_trade_price_24h")}
-            for t in tickers[:limit]]
+    return [{"market": t["market"], "name": names[t["market"]]} for t in tickers[:limit]]
 
 
 # ---- 거래 (개인, 키 필요) ----

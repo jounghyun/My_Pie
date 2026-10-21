@@ -140,7 +140,8 @@ class Bot:
         self._ensure_book_slots()
 
         self.prices: dict[str, float] = {}
-        self.markets_day: str | None = (db.get_state("markets") or {}).get("day")
+        stored = db.get_state("markets") or {}
+        self.markets_day: str | None = stored.get("day") if stored.get("all") else None  # 예전(상위 30개) 목록이면 바로 다시 받는다
         self.key_day: str | None = (db.get_state("key_info") or {}).get("checked")
         self.report_day: str | None = db.get_state("report_day")
         self.last_snapshot = 0.0
@@ -712,10 +713,10 @@ class Bot:
         })
 
     def _update_markets(self, day: str) -> None:
-        """하루 한 번: 거래대금 상위 원화 종목 목록 (웹페이지 종목 선택용)."""
+        """하루 한 번: 원화 종목 전부, 거래대금 순 (웹페이지 종목 선택용)."""
         self.markets_day = day
         try:
-            self.db.set_state("markets", {"day": day, "list": upbit.get_krw_markets(30)})
+            self.db.set_state("markets", {"day": day, "all": True, "list": upbit.get_krw_markets(None)})
         except upbit.UpbitError as e:
             log.warning("종목 목록을 받지 못했어요: %s", e)
 
