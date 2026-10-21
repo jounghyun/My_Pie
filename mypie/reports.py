@@ -1,15 +1,19 @@
-"""텔레그램으로 보내는 글: 매일 아침 리포트, /기록 · /상태 · /도움 명령에 대한 답장."""
+"""텔레그램으로 보내는 글: 매일 아침 리포트, /기록 · /상태 · /주식 · /도움 명령에 대한 답장."""
+
+from pathlib import Path
 
 from .db import Database
 
 HELP = ("🥧 My_Pie 명령어\n"
         "/상태 (/status) — 지금 포트폴리오와 총 자산\n"
         "/기록 (/trades) — 최근 매매 기록 10건\n"
+        "/주식 (/stock) — 주식 금고와 종목 계좌\n"
         "/도움 (/help) — 이 안내")
 
 COMMANDS = {  # 텔레그램 메뉴에 보일 영어 명령 (한글 명령도 똑같이 알아듣는다)
     "status": "지금 포트폴리오와 총 자산",
     "trades": "최근 매매 기록 10건",
+    "stock": "주식 금고와 종목 계좌",
     "help": "명령어 안내",
 }
 
@@ -68,11 +72,21 @@ def daily_text(trades: list[dict], status: dict | None) -> str:
     return "\n".join(head + body) + "\n\n" + status_text(status)
 
 
-def command_reply(text: str, db: Database) -> str | None:
-    """텔레그램 메시지 → 답장. 명령이 아닌 그냥 말에는 안내를 보낸다."""
+def command_reply(text: str, db: Database, stock_db: str | None = None) -> str | None:
+    """텔레그램 메시지 → 답장. 명령이 아닌 그냥 말에는 안내를 보낸다. stock_db: 주식 봇 DB 파일."""
     word = (text or "").strip().split()[0].split("@")[0].lstrip("/").lower() if (text or "").strip() else ""
     if word in ("상태", "status"):
         return status_text(db.get_state("status"))
     if word in ("기록", "trades", "매매"):
         return trades_text(db.recent_trades(10))
+    if word in ("주식", "stock"):
+        from .stockbot import status_text as stock_status_text
+
+        if not stock_db or not Path(stock_db).exists():
+            return stock_status_text(None)
+        sdb = Database(stock_db, create=False)
+        try:
+            return stock_status_text(sdb.get_state("status"))
+        finally:
+            sdb.close()
     return HELP

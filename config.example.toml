@@ -35,6 +35,17 @@ login = true              # 텔레그램이 연결돼 있으면 로그인 코드
 code_digits = 2           # 로그인 코드 자릿수 (2~8). 짧을수록 입력이 편하지만 찍어서 맞히기도 쉬워요
 session_days = 30         # 한 번 로그인한 기기를 다시 묻지 않는 기간 (일)
 
+[stock]                   # 주식 봇 (토스증권 · 국내 주식, 서비스 이름 mypie-stock)
+db_path = "data/stock.db" # 코인과 따로 기록한다
+mode = "paper"            # 처음 계좌 (웹페이지 주식 화면에서 바꿈)
+paper_cash = 1000000      # 모의투자 금고 시작 금액
+fee_rate = 0.00015        # 매매 수수료 (사고팔 때)
+sell_tax = 0.002          # 증권거래세 (팔 때만)
+interval_sec = 10         # 장중 확인 간격 (초)
+idle_sec = 60             # 장 밖 확인 간격 (초)
+backtest_days = 1095      # 전략 순위를 매길 과거 기간 (일)
+rank_by = "return"
+
 # 전략별 숫자를 바꾸고 싶으면 이렇게 (안 적으면 기본값)
 # [params.volatility_breakout]
 # k = 0.5

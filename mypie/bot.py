@@ -269,7 +269,7 @@ class Bot:
                 if str(message.get("chat", {}).get("id")) != str(chat):
                     continue
                 try:
-                    telegram.send(reports.command_reply(message.get("text", ""), db), creds)
+                    telegram.send(reports.command_reply(message.get("text", ""), db, self.cfg["stock"]["db_path"]), creds)
                 except telegram.TelegramError as e:
                     log.warning("텔레그램 답장 실패: %s", e)
 

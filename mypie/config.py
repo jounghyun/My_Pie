@@ -15,6 +15,9 @@ DEFAULTS = {
     "backtest": {"days": 1095, "rank_by": "return"},
     "params": {},
     "web": {"host": "0.0.0.0", "port": 8000, "login": True, "code_digits": 2, "session_days": 30},
+    # 주식 봇 (토스증권 · 국내 주식). 수수료는 사고팔 때 모두, 증권거래세는 팔 때만 붙는다
+    "stock": {"db_path": "data/stock.db", "mode": "paper", "paper_cash": 1_000_000, "fee_rate": 0.00015,
+              "sell_tax": 0.002, "interval_sec": 10, "idle_sec": 60, "backtest_days": 1095, "rank_by": "return"},
 }
 
 
@@ -32,7 +35,8 @@ def load_config(path: str | None = None) -> dict:
             cfg["_path"] = str(candidate)
             break
 
-    db_path = Path(cfg["general"]["db_path"])
-    if not db_path.is_absolute():
-        cfg["general"]["db_path"] = str(ROOT / db_path)
+    for section in ("general", "stock"):
+        db_path = Path(cfg[section]["db_path"])
+        if not db_path.is_absolute():
+            cfg[section]["db_path"] = str(ROOT / db_path)
     return cfg

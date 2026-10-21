@@ -29,6 +29,7 @@ class Strategy:
     guide = ""              # 초보자용 쉬운 설명 (원리 · 장점 · 약점)
     exit_next_open = False  # 산 다음 날 09시에 무조건 파는 전략인지 (화면 안내용)
     defaults: dict = {}
+    window = 150            # plan()에 넘기는 과거 봉 개수 (긴 기간을 보는 전략은 늘린다)
 
     def __init__(self, params: dict | None = None):
         self.params = {**self.defaults, **(params or {})}

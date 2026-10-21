@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from mypie import auth, backtest, indicators, keys, pin, reports, timeframes, upbit, web
+from mypie import auth, backtest, indicators, keys, krx, pin, reports, telegram, timeframes, upbit, web
 from mypie.bot import Bot, validate_slots
 from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
@@ -31,6 +31,8 @@ from mypie.timeutil import KST, trading_day
 from mypie.upbit import OrderRejected, UpbitError, make_token
 
 logging.disable(logging.CRITICAL)
+# 테스트 속 봇이 파이 .env의 진짜 텔레그램으로 알림을 보내지 않게 한다 (필요한 테스트는 따로 mock.patch로 바꾼다)
+telegram.load = lambda: None
 
 
 def candle(day, o, h, l, c):
@@ -928,6 +930,7 @@ class ReportTest(TempDbTest):
         self.assertIn("최근 매매 기록", reports.command_reply("/trades@my_pie_bot", self.db))
         self.assertIn("총 자산", reports.command_reply("/status", self.db))
         self.assertIn("명령어", reports.command_reply("안녕", self.db))       # 모르는 말에는 안내
+        self.assertIn("주식 봇이 아직", reports.command_reply("/주식", self.db, "/no/such.db"))
 
     def test_morning_report_once_per_day(self):
         cfg = {section: dict(values) for section, values in DEFAULTS.items()}

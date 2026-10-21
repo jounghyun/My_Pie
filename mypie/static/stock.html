@@ -1,0 +1,887 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My_Pie 주식</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<link rel="stylesheet" href="/app.css">
+<style>
+  /* 주식 화면에만 있는 것 */
+  .vault-big { font-size: clamp(22px, 4.5vw, 30px); font-weight: 800; letter-spacing: -0.02em; margin: 4px 0 2px; }
+  .mini-rows { display: grid; gap: 4px; margin-top: 10px; font-size: 13px; }
+  .mini-rows div { display: flex; justify-content: space-between; gap: 8px; }
+  .mini-rows span:first-child { color: var(--muted); }
+  .slot-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .slot-actions button { min-height: 32px; padding: 4px 10px; font-size: 12.5px; }
+  .panel { margin-top: 10px; padding: 10px; border-radius: 12px; background: var(--soft); display: grid; gap: 8px; }
+  .panel .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .panel input[type=number] { width: 140px; }
+  .panel .hint { flex-basis: 100%; }
+  .add-card { border: 2px dashed var(--line); background: transparent; box-shadow: none; display: grid; place-items: center;
+              min-height: 140px; cursor: pointer; color: var(--muted); font-weight: 650; }
+  .add-card:hover { border-color: var(--brand); color: var(--brand); }
+  .search { position: relative; }
+  .search input { width: 100%; font: inherit; border-radius: 10px; border: 1px solid var(--line); padding: 9px 12px; min-height: 42px;
+                  background: var(--card); color: var(--text); }
+  .suggest { position: absolute; left: 0; right: 0; top: 46px; z-index: 6; background: var(--card); border: 1px solid var(--line);
+             border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.12); max-height: 280px; overflow-y: auto; }
+  .suggest button { display: flex; justify-content: space-between; width: 100%; border: 0; border-radius: 0; min-height: 40px;
+                    background: transparent; text-align: left; }
+  .suggest button:hover, .suggest button:focus { background: var(--soft); }
+  .suggest small { color: var(--muted); }
+  .picked { font-weight: 700; }
+  .addgrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.4fr) minmax(0, .8fr); gap: 10px; }
+  @media (max-width: 760px) { .addgrid { grid-template-columns: 1fr; } }
+  .addgrid label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+  .addgrid select, .addgrid input[type=number] { width: 100%; min-width: 0; color: var(--text); }
+  .setup { display: grid; gap: 6px; }
+  .tagline { font-size: 11px; font-weight: 700; color: var(--brand); background: var(--brand-soft); border-radius: 6px; padding: 0 6px; margin-left: 6px; }
+  .simbar { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.6fr) minmax(0, .7fr); gap: 8px; }
+  @media (max-width: 640px) { .simbar { grid-template-columns: 1fr 1fr; } .simbar .wide { grid-column: 1 / -1; } }
+  .simbar label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+  .simbar select { width: 100%; min-width: 0; color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="top-in">
+      <div class="brand"><span class="logo">🥧</span>My_Pie</div>
+      <div class="seg switch"><a href="/">🪙 코인</a><a href="/stock" aria-current="page">📈 주식</a></div>
+      <span class="chip" id="modeChip">-</span>
+      <span class="chip" id="sessionChip">-</span>
+      <div class="top-right">
+        <span class="num" id="clock"></span>
+        <div class="beat"><span class="dot" id="dot"></span><span id="beat">불러오는 중…</span></div>
+        <button type="button" id="logout" class="ghost small">로그아웃</button>
+      </div>
+      <nav class="jump">
+        <a href="#overview">개요</a><a href="#slots">종목 계좌</a><a href="#chart">차트</a><a href="#sim">시뮬레이션</a>
+        <a href="#settings">계좌 설정</a><a href="#guides">전략 설명</a><a href="#history">기록</a>
+      </nav>
+    </div>
+  </div>
+
+  <div class="alerts" id="alerts"></div>
+
+  <!-- 키 등록 안내 (키가 없을 때만) -->
+  <section class="card" id="setup" hidden>
+    <h2><span class="ico">🔑</span>토스증권 연결하기</h2>
+    <ol class="steps">
+      <li>PC에서 <b>토스증권 웹(WTS)</b>에 로그인 → <b>설정 → Open API</b>에서 <b>Client ID · Client Secret</b>을 발급받아요.</li>
+      <li>같은 화면 <b>허용 IP 관리</b>에 집 IP <b id="homeIp">-</b> 를 등록해요.</li>
+      <li>토스증권 앱에서 <b>투자자지시 거래소</b>를 <b>통합(SOR)</b>으로 해 두세요. 아니면 주문이 거절돼요.</li>
+      <li>파이에서 <code>python3 -m mypie.toss</code> 를 실행하고 두 값을 붙여넣으면 끝이에요. 1분 안에 이 화면이 살아나요.</li>
+    </ol>
+    <p class="desc">키는 파이의 .env 파일에만 저장되고, 처음에는 <b>모의투자</b>(가상 돈 100만 원)로 시작해요.</p>
+  </section>
+
+  <!-- 개요 -->
+  <div class="hero" id="overview" style="margin-top:14px">
+    <div class="card total-card">
+      <div class="total-main">
+        <div class="label">주식 총 자산</div>
+        <div class="big num" id="equity">-</div>
+        <div><span class="badge" id="retBadge">-</span> <span class="sub num" id="pnl" style="display:inline"></span></div>
+        <div class="sub num" id="totalSub" style="margin-top:6px">-</div>
+        <div class="mini-rows num" id="totalRows"></div>
+      </div>
+      <div class="chart-box" id="equityBox" style="flex:1 1 220px;min-width:0"></div>
+    </div>
+    <div class="card">
+      <div class="label">🏦 금고 (쉬는 돈)</div>
+      <div class="vault-big num" id="vault">-</div>
+      <div class="sub" id="vaultSub">입금하면 금고로 들어와요</div>
+      <div class="slot-actions" id="vaultActions" hidden>
+        <button type="button" id="paperIn">＋ 가상 입금</button>
+        <button type="button" id="paperOut" class="ghost">가상 출금</button>
+      </div>
+      <div id="vaultPanel"></div>
+    </div>
+    <div class="card">
+      <div class="label" id="sessLabel">장 상태</div>
+      <div class="ring-wrap">
+        <svg class="ring" viewBox="0 0 80 80" aria-hidden="true">
+          <circle cx="40" cy="40" r="32" fill="none" stroke="var(--soft)" stroke-width="9"/>
+          <circle id="ringArc" cx="40" cy="40" r="32" fill="none" stroke="url(#ringGrad)" stroke-width="9" stroke-linecap="round"
+                  stroke-dasharray="201" stroke-dashoffset="201" transform="rotate(-90 40 40)"/>
+          <defs><linearGradient id="ringGrad" x1="0" x2="1"><stop offset="0" stop-color="var(--brand)"/><stop offset="1" stop-color="var(--brand2)"/></linearGradient></defs>
+        </svg>
+        <div class="ring-text"><div class="countdown num" id="countdown">--:--:--</div><div class="sub" id="countSub">-</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 종목 계좌 -->
+  <section id="slots" style="margin-top:14px">
+    <h2 style="margin:0 0 10px"><span class="ico">📦</span>종목 계좌 <small class="muted" style="font-weight:400;font-size:12.5px">종목 하나 + 전략 하나 · 자기 잔액으로만 사고, 팔면 잔액에 남아요</small></h2>
+    <div class="slots" id="slotCards"></div>
+  </section>
+
+  <!-- 종목 계좌 만들기 -->
+  <section class="card" id="addBox" hidden>
+    <h2><span class="ico">➕</span>종목 계좌 만들기 <small>실거래면 계좌에 원래 있던 그 종목 주식도 이 계좌로 가져와요</small>
+      <button type="button" class="ghost small right" id="addClose">닫기</button></h2>
+    <div class="addgrid">
+      <label>종목 (이름이나 코드)
+        <div class="search"><input id="addSearch" placeholder="예: 삼성전자, 005930" autocomplete="off"><div class="suggest" id="addSuggest" hidden></div></div>
+      </label>
+      <label>전략 <span id="addRankNote"></span><select id="addStrategy"></select></label>
+      <label>금고에서 넣을 돈 (원)<input type="number" id="addAmount" min="0" step="10000" placeholder="0" inputmode="numeric"></label>
+    </div>
+    <p class="guide-now" id="addGuide" hidden></p>
+    <div class="actions">
+      <input id="addPin" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off" maxlength="32" aria-label="PIN">
+      <button type="button" class="primary" id="addGo">종목 계좌 만들기</button>
+      <span class="hint" id="addPicked">종목을 먼저 골라 주세요</span>
+    </div>
+  </section>
+
+  <!-- 가격 차트 -->
+  <section class="card" id="chart">
+    <h2><span class="ico">📈</span>가격 차트 <small id="chartSub">일봉 · ▲매수 ▼매도</small>
+      <span class="right seg" id="rangeSeg">
+        <button type="button" data-bars="60">3달</button><button type="button" data-bars="120" aria-pressed="true">6달</button><button type="button" data-bars="250">1년</button>
+      </span>
+    </h2>
+    <div class="pills" id="chartPills"></div>
+    <div class="chart-box" id="candleBox"><div class="empty">종목 계좌를 만들면 보여요</div></div>
+    <div class="legend" id="candleLegend"></div>
+  </section>
+
+  <!-- 전략 시뮬레이션 -->
+  <section class="card" id="sim">
+    <h2><span class="ico">🥇</span>전략 순위 · 시뮬레이션 <small>과거에 이 종목을 이 전략대로 사고팔았다면?</small></h2>
+    <div class="simbar">
+      <label>종목
+        <div class="search"><input id="simSearch" placeholder="이름이나 코드" autocomplete="off"><div class="suggest" id="simSuggest" hidden></div></div>
+      </label>
+      <label class="wide">전략 (이 기간 순위)<select id="simStrategy"></select></label>
+      <label>과거 기간<select id="simDays"></select></label>
+    </div>
+    <p class="simline" id="simLine">종목을 고르면 계산해요</p>
+    <div class="simtiles" id="simTiles"></div>
+    <div class="chart-box" id="simBox"></div>
+    <div class="legend" id="simLegend"></div>
+    <h3 class="subhead" id="rankHead">같은 기간 전략 순위</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th class="left">순위</th><th class="left">전략</th><th>수익률</th><th>연평균</th><th>최대 낙폭</th><th>승률</th><th>매매</th><th>추이</th></tr></thead>
+        <tbody id="ranks"></tbody>
+      </table>
+    </div>
+    <p class="note">줄을 누르면 위 차트가 그 전략으로 바뀌어요 · ⚠️ "과거에 이렇게 했다면?"을 계산한 결과라 앞으로도 같다는 보장은 없어요 · 수수료 0.015%와 팔 때 증권거래세 0.2% 반영 · 100만 원으로 시작했다고 치고 계산</p>
+  </section>
+
+  <!-- 계좌 설정 -->
+  <section class="card" id="settings">
+    <h2><span class="ico">⚙️</span>계좌 설정 <small>모의투자와 실거래는 금고·종목 계좌를 따로 써요</small></h2>
+    <div class="form">
+      <div class="field-label">계좌</div>
+      <div class="field">
+        <div class="seg big"><button type="button" id="modePaper">모의투자</button><button type="button" id="modeLive">실거래</button></div>
+        <span class="hint" id="keyState"></span>
+      </div>
+    </div>
+    <label class="check" id="confirmRow" hidden style="margin-top:10px">
+      <input type="checkbox" id="confirmLive"> 실제 돈으로 주문이 나간다는 걸 이해했어요
+    </label>
+    <div class="actions">
+      <input id="modePin" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off" maxlength="32" aria-label="PIN">
+      <button type="button" class="primary" id="modeGo" disabled>계좌 바꾸기</button>
+    </div>
+    <p class="msg" id="modeMsg"></p>
+  </section>
+
+  <!-- 전략 설명 -->
+  <section class="card" id="guides">
+    <h2><span class="ico">📚</span>전략 설명 <small>주식 기준 · 눌러서 펼치기 · 숫자는 거래일(장이 열린 날) 기준</small></h2>
+    <div id="guideList"></div>
+  </section>
+
+  <!-- 기록 -->
+  <div class="row2" id="history">
+    <section class="card">
+      <h2><span class="ico">🧾</span>매매 기록 <small id="tradesSub"></small></h2>
+      <div class="scroll"><table><thead><tr><th class="left">시각</th><th class="left">종목</th><th>구분</th><th>가격</th><th>수량</th><th>금액</th><th>손익</th></tr></thead><tbody id="trades"></tbody></table></div>
+      <div class="empty" id="tradesEmpty">아직 매매가 없어요</div>
+    </section>
+    <section class="card">
+      <h2><span class="ico">📜</span>이벤트</h2>
+      <ul class="events" id="events"></ul>
+    </section>
+  </div>
+</div>
+<div id="toasts" class="toasts"></div>
+
+<script>
+// ---------- 도우미 ----------
+const $ = (id) => document.getElementById(id);
+const won = (n) => n == null || isNaN(n) ? '-' : Math.round(n).toLocaleString('ko-KR') + '원';
+const signedWon = (n) => n == null ? '-' : (n > 0 ? '+' : '') + won(n);
+const pct = (n, d = 2) => n == null || isNaN(n) ? '-' : (n > 0 ? '+' : '') + n.toFixed(d) + '%';
+const parseTs = (s) => new Date(s.replace(' ', 'T') + '+09:00');
+function compact(v) {
+  const a = Math.abs(v);
+  if (a >= 1e8) return (v / 1e8).toFixed(a >= 1e10 ? 0 : 2) + '억';
+  if (a >= 1e4) return (v / 1e4).toFixed(a >= 1e6 ? 0 : 1) + '만';
+  return Math.round(v).toLocaleString('ko-KR');
+}
+function tone(e, n) { e.classList.remove('up', 'down'); if (n > 0) e.classList.add('up'); else if (n < 0) e.classList.add('down'); }
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) { if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else e.setAttribute(k, v); }
+  e.append(...kids);
+  return e;
+}
+const SVG = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs = {}) { const e = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; }
+function cell(tr, text, cls) { const td = el('td', { class: cls || '', text }); tr.appendChild(td); return td; }
+function ago(sec) { sec = Math.max(0, Math.round(sec)); return sec < 60 ? sec + '초 전' : sec < 3600 ? Math.floor(sec / 60) + '분 전' : Math.floor(sec / 3600) + '시간 전'; }
+async function getJSON(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (r.status === 401) { location.reload(); throw new Error('login'); }
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+async function postJSON(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.status === 401) { location.reload(); throw new Error('login'); }
+  return r.json();
+}
+function toast(text, kind) {
+  const t = el('div', { class: 'toast ' + ({ bad: 'error', warn: 'warning' }[kind] || ''), text });
+  $('toasts').append(t);
+  setTimeout(() => t.remove(), 5000);
+}
+function josa(word, withBatchim, without) {  // 받침에 맞는 조사 (을/를, 으로/로)
+  const ch = [...String(word)].reverse().find(c => c >= '가' && c <= '힣');
+  const jong = ch ? (ch.charCodeAt(0) - 0xAC00) % 28 : 0;
+  if (without === '로') return jong === 0 || jong === 8 ? '로' : '으로';
+  return jong ? withBatchim : without;
+}
+// 전략 설명 자리표시 → 주식 말로 ("5일" 대신 "5거래일")
+function fmtGuide(text) {
+  const words = { prev: '전날', cur: '오늘', next: '다음 장 시작(09:00)에', hold: '하루' };
+  return (text || '').replace(/\{(N:(\d+)|prev|cur|next|hold)\}/g, (_, t, n) => n ? `${n}거래일` : words[t]);
+}
+
+const S = { data: null, offset: 0, sel: null, bars: 120, candles: null, sim: null, simSel: null, simSeq: 0,
+            pin: '', open: {}, seen: null, mine: {}, add: null, guidesDone: false, requested: {} };
+const SIM_BASE = 1e6;
+const MEDALS = ['🥇', '🥈', '🥉'];
+const COLORS = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c6)', 'var(--c7)', 'var(--c8)', 'var(--c9)', 'var(--c10)', 'var(--c11)'];
+const strat = (name) => (S.data.strategies || []).find(x => x.name === name) || { name, label: name };
+const slots = () => (S.data && S.data.status && S.data.status.slots) || [];
+const slotOf = (sym) => slots().find(x => x.symbol === sym);
+
+// ---------- 요청 (PIN) ----------
+async function send(body, pinInput, done) {
+  const p = (pinInput && pinInput.value) || S.pin;
+  if (!p) { toast('PIN을 넣어 주세요', 'bad'); if (pinInput) pinInput.focus(); return false; }
+  try {
+    const r = await postJSON('/api/stock/control', { ...body, pin: p });
+    if (!r.ok) { toast(r.message, 'bad'); return false; }
+    S.pin = p;  // 이 창을 닫기 전까지만 기억 (다음 요청에 PIN을 다시 안 넣어도 되게)
+    S.mine[r.id] = true;
+    toast('⏳ ' + r.message, 'info');
+    if (done) done();
+    setTimeout(refresh, 1500);
+    return true;
+  } catch (e) { toast('요청을 보내지 못했어요. 파이 연결을 확인해 주세요.', 'bad'); return false; }
+}
+function pinField() { return el('input', { type: 'password', inputmode: 'numeric', placeholder: S.pin ? 'PIN (기억됨)' : 'PIN', autocomplete: 'off', maxlength: 32, 'aria-label': 'PIN' }); }
+
+// ---------- 전체 그리기 ----------
+function renderAll() {
+  const d = S.data, s = d.status;
+  S.offset = parseTs(d.server_time).getTime() - Date.now();
+  renderAlerts(d);
+  $('setup').hidden = !!d.keys;
+  $('homeIp').textContent = (d.network && d.network.ip) || '(파이에서 확인)';
+  if (!s) { setBeat('bad', '주식 봇이 아직 시작되지 않았어요'); return; }
+  const age = (parseTs(d.server_time) - parseTs(s.updated_at)) / 1000;
+  setBeat(age < 180 ? 'ok' : 'bad', (age < 180 ? '정상 작동 · ' : '주식 봇 응답 없음 · ') + ago(age));
+  const live = s.mode === 'live';
+  $('modeChip').textContent = live ? '🔴 실거래' : '🧪 모의투자';
+  $('modeChip').className = 'chip ' + (live ? 'live' : 'paper');
+  $('sessionChip').textContent = '🕘 ' + s.session_text;
+  renderTotal(s, d);
+  renderSlots(s);
+  renderSettings(d);
+  renderPills();
+  renderTrades(d.trades);
+  renderEvents(d.events);
+  renderResults(d.results);
+  if (!S.guidesDone) renderGuides();
+  if (!S.sel && slots().length) selectSymbol(slots()[0].symbol);
+  if (!S.simSel && slots().length) simPick(slots()[0].symbol, slots()[0].name, slots()[0].strategy.name);
+  simTick();
+  document.title = s.account ? `${won(s.account.equity)} · My_Pie 주식` : 'My_Pie 주식';
+}
+function setBeat(kind, text) { $('dot').className = 'dot ' + kind; $('beat').textContent = text; }
+
+function renderAlerts(d) {
+  const box = $('alerts'); box.innerHTML = '';
+  const add = (kind, icon, strong, text) => box.appendChild(el('div', { class: 'alert ' + kind }, el('span', { text: icon }), el('div', {}, el('b', { text: strong }), ' ' + text)));
+  const s = d.status;
+  if (s && s.ip_error) add('bad', '🚫', '토스증권이 지금 IP를 허용하지 않아요.', `토스증권 WTS → 설정 → Open API → 허용 IP에 ${(d.network && d.network.ip) || '지금 집 IP'}를 등록해 주세요.`);
+  if (d.pending_order) add('info', '⏳', '끊기기 전에 낸 주문을 확인하는 중이에요.', '토스증권에 결과를 물어서 장부를 맞춘 뒤 이어서 매매해요.');
+  if (s && s.mode === 'live' && s.account && !s.account.synced) add('info', '🔗', '토스증권 계좌를 맞추는 중이에요.', '계좌의 현금이 금고로 들어와요.');
+}
+
+function renderTotal(s, d) {
+  const a = s.account;
+  if (!a) { $('equity').textContent = '-'; $('totalSub').textContent = '토스증권 키를 등록하면 시작해요'; return; }
+  $('equity').textContent = won(a.equity);
+  const r = a.return_pct;
+  $('retBadge').textContent = (r > 0 ? '▲ ' : r < 0 ? '▼ ' : '') + (r == null ? '-' : Math.abs(r).toFixed(2) + '%');
+  $('retBadge').className = 'badge ' + (r > 0 ? 'up' : r < 0 ? 'down' : '');
+  tone($('retBadge'), r);
+  $('pnl').textContent = signedWon(a.equity - a.contributions); tone($('pnl'), a.equity - a.contributions);
+  $('totalSub').textContent = `넣은 돈 ${won(a.contributions)}` + (s.mode === 'live' ? ' (입출금 반영)' : '');
+  const slotCash = a.cash - a.vault;
+  const rows = $('totalRows'); rows.innerHTML = '';
+  for (const [k, v] of [['🏦 금고', a.vault], ['📦 종목 계좌 잔액', slotCash], ['📊 주식 평가금액', a.invested]])
+    rows.append(el('div', {}, el('span', { text: k }), el('span', { text: won(v) })));
+  if (s.broker && s.broker.other && s.broker.other.length)
+    rows.append(el('div', {}, el('span', { text: '🙈 봇이 안 굴리는 주식' }), el('span', { text: s.broker.other.map(x => x.name).slice(0, 3).join(', ') + (s.broker.other.length > 3 ? ' 외' : '') })));
+  $('vault').textContent = won(a.vault);
+  $('vaultSub').textContent = s.mode === 'live' ? '토스증권 계좌에 입금하면 여기로 들어와요' : '모의투자: 가상 입금·출금으로 금고를 채워요';
+  $('vaultActions').hidden = s.mode !== 'paper';
+  renderEquity(d.equity, a.contributions);
+}
+
+function renderEquity(points, base) {
+  const box = $('equityBox');
+  if (!points || points.length < 2) { box.innerHTML = ''; return; }
+  const W = Math.max(200, box.clientWidth), H = 90;
+  const vals = points.map(p => p.equity), lo = Math.min(...vals, base), hi = Math.max(...vals, base), span = hi - lo || 1;
+  const x = (i) => i / (points.length - 1) * W, y = (v) => 6 + (hi - v) / span * (H - 12);
+  const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, height: H });
+  root.append(svg('line', { x1: 0, x2: W, y1: y(base), y2: y(base), stroke: 'var(--muted)', 'stroke-dasharray': '3 3', opacity: .6 }));
+  root.append(svg('polyline', { points: vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' '), fill: 'none',
+                                stroke: vals[vals.length - 1] >= base ? 'var(--up)' : 'var(--down)', 'stroke-width': 2 }));
+  box.innerHTML = ''; box.append(root, el('div', { class: 'sub', text: '최근 7일 자산 추이 · 점선은 넣은 돈' }));
+}
+
+// ---------- 종목 계좌 카드 ----------
+function planLine(x) {
+  const p = x.plan;
+  if (!p) return '';
+  if (x.holding && x.strategy.exit_next_open) return '· 다음 장 시작에 매도 예정';
+  if (x.holding && p.sell_stop != null) return `· 매도 기준 ${won(p.sell_stop)}`;
+  if (!x.holding && p.buy_stop != null) return `· 매수 목표 ${won(p.buy_stop)}`;
+  return `· 오늘 신호 ${x.holding ? '보유 유지' : '관망'}`;
+}
+function renderSlots(s) {
+  const box = $('slotCards');
+  const focused = document.activeElement && box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+  if (focused) return;  // 입력 중이면 다시 그리지 않는다 (글자가 날아가지 않게)
+  box.innerHTML = '';
+  s.slots.forEach((x, i) => {
+    const card = el('div', { class: 'card slot-card' + (x.symbol === S.sel ? ' sel' : ''), title: '눌러서 이 종목 차트·시뮬레이션 보기' });
+    card.append(el('div', { class: 'bar', style: `background:${COLORS[i % COLORS.length]}` }));
+    card.append(el('div', { class: 'slot-head' }, el('div', { class: 'slot-name' }, x.name, el('small', { text: x.symbol })),
+      el('span', { class: 'chip', text: x.holding ? `🟢 ${x.qty.toLocaleString()}주` : '⏳ 대기' })));
+    const price = el('div', { class: 'slot-price num' }, won(x.price) + ' ');
+    if (x.change_rate != null) { const b = el('span', { class: 'badge', text: pct(x.change_rate) }); tone(b, x.change_rate); b.classList.add(x.change_rate > 0 ? 'up' : x.change_rate < 0 ? 'down' : 'x'); price.append(b); }
+    card.append(price, el('div', { class: 'slot-strat' }, el('b', { text: '🧠 ' + x.strategy.label }), ' ' + planLine(x)),
+                el('div', { class: 'slot-state', text: (x.holding ? '🟢 ' : '⏳ ') + x.state_text }));
+    const ret = el('div', { class: 'v num', text: pct(x.return_pct) }); tone(ret, x.return_pct);
+    const unr = el('div', { class: 'v num', text: x.holding ? signedWon(x.unrealized) : won(x.value) }); tone(unr, x.unrealized);
+    card.append(el('div', { class: 'slot-foot' },
+      el('div', { class: 'tile' }, el('div', { class: 'label', text: '💵 잔액 (살 돈)' }), el('div', { class: 'v num', text: won(x.cash) })),
+      el('div', { class: 'tile' }, el('div', { class: 'label', text: x.holding ? `평가 손익 ${pct(x.unrealized_pct, 1)}` : '주식 평가금액' }), unr),
+      el('div', { class: 'tile' }, el('div', { class: 'label', text: '계좌 수익률' }), ret),
+      el('div', { class: 'tile' }, el('div', { class: 'label', text: '넣은 돈' }), el('div', { class: 'v num', text: won(x.contrib) }))));
+    const acts = el('div', { class: 'slot-actions' });
+    const panel = el('div');
+    const open = (kind) => { S.open = S.open.slot === x.id && S.open.kind === kind ? {} : { slot: x.id, kind }; renderSlots(S.data.status); };
+    for (const [kind, label, cls] of [['in', '🏦→ 넣기', ''], ['out', '→🏦 빼기', 'ghost'], ['strategy', '전략 바꾸기', 'ghost'], ['remove', '지우기', 'ghost']]) {
+      const b = el('button', { type: 'button', class: cls, text: label });
+      b.onclick = (ev) => { ev.stopPropagation(); open(kind); };
+      acts.append(b);
+    }
+    card.append(acts, panel);
+    if (S.open.slot === x.id) panel.append(slotPanel(x, S.open.kind));
+    card.onclick = (ev) => { if (!ev.target.closest('.slot-actions, .panel')) selectSymbol(x.symbol); };
+    box.append(card);
+  });
+  const add = el('div', { class: 'card add-card', text: '＋ 종목 계좌 만들기' });
+  add.onclick = () => { $('addBox').hidden = false; $('addBox').scrollIntoView({ block: 'start' }); $('addSearch').focus(); };
+  box.append(add);
+}
+function slotPanel(x, kind) {
+  const p = el('div', { class: 'panel' }), row = el('div', { class: 'row' }), pin = pinField();
+  const close = () => { S.open = {}; renderSlots(S.data.status); };
+  if (kind === 'in' || kind === 'out') {
+    const max = kind === 'in' ? S.data.status.account.vault : x.cash;
+    const amt = el('input', { type: 'number', min: 0, step: 10000, placeholder: '금액 (원)', inputmode: 'numeric' });
+    const all = el('label', { class: 'toggle' }, el('input', { type: 'checkbox' }), '전부');
+    const go = el('button', { type: 'button', class: 'primary', text: kind === 'in' ? '금고 → 이 계좌' : '이 계좌 → 금고' });
+    go.onclick = () => {
+      const every = all.querySelector('input').checked;
+      if (!every && !(Number(amt.value) > 0)) { toast('금액을 넣어 주세요', 'bad'); return; }
+      send({ action: 'transfer', slot: x.id, direction: kind, amount: Number(amt.value), all: every }, pin, close);
+    };
+    row.append(amt, all, pin, go);
+    p.append(row, el('span', { class: 'hint', text: kind === 'in'
+      ? `금고에 ${won(max)} 있어요. 넣어도 바로 사지 않고, 매수 신호가 날 때 이 잔액으로 사요.`
+      : `이 계좌 잔액 ${won(max)}을(를) 금고로 옮겨요. 주식은 그대로예요.` }));
+  } else if (kind === 'strategy') {
+    const sel = el('select', { 'aria-label': '새 전략' });
+    for (const r of rankedFor(x.symbol)) sel.append(el('option', { value: r.name, text: optionText(r) }));
+    sel.value = x.strategy.name;
+    const go = el('button', { type: 'button', class: 'primary', text: '바꾸기' });
+    go.onclick = () => send({ action: 'strategy', slot: x.id, strategy: sel.value }, pin, close);
+    row.append(sel, pin, go);
+    p.append(row, el('span', { class: 'hint', text: '들고 있는 주식은 팔지 않고, 새 전략이 바로(장중) 또는 다음 장 시작에 판단해요.' }));
+  } else {
+    const go = el('button', { type: 'button', class: 'primary', text: '지우기' });
+    go.disabled = x.qty > 0;
+    go.onclick = () => send({ action: 'remove', slot: x.id }, pin, close);
+    row.append(pin, go);
+    p.append(row, el('span', { class: 'hint', text: x.qty > 0 ? `주식이 ${x.qty}주 남아 있어서 지울 수 없어요. 다 판 뒤에 지워 주세요.` : `잔액 ${won(x.cash)}은 금고로 옮기고 지워요.` }));
+  }
+  p.onclick = (ev) => ev.stopPropagation();
+  return p;
+}
+
+// ---------- 금고 (모의투자 가상 입출금) ----------
+for (const [id, sign] of [['paperIn', 1], ['paperOut', -1]]) {
+  $(id).onclick = () => {
+    const box = $('vaultPanel'); box.innerHTML = '';
+    const p = el('div', { class: 'panel' }), row = el('div', { class: 'row' }), pin = pinField();
+    const amt = el('input', { type: 'number', min: 0, step: 100000, placeholder: '금액 (원)', inputmode: 'numeric' });
+    const go = el('button', { type: 'button', class: 'primary', text: sign > 0 ? '가상 입금' : '가상 출금' });
+    go.onclick = () => { if (!(Number(amt.value) > 0)) { toast('금액을 넣어 주세요', 'bad'); return; }
+      send({ action: 'paper_cash', amount: sign * Number(amt.value) }, pin, () => { box.innerHTML = ''; }); };
+    const cancel = el('button', { type: 'button', class: 'ghost', text: '닫기' }); cancel.onclick = () => { box.innerHTML = ''; };
+    row.append(amt, pin, go, cancel); p.append(row); box.append(p); amt.focus();
+  };
+}
+
+// ---------- 종목 찾기 (만들기·시뮬레이션 공용) ----------
+function searchBox(input, list, onPick) {
+  let timer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (!q) { list.hidden = true; return; }
+    timer = setTimeout(async () => {
+      try {
+        const found = await getJSON('/api/stock/search?q=' + encodeURIComponent(q));
+        list.innerHTML = '';
+        if (!found.length) list.append(el('div', { class: 'empty', text: S.data && S.data.keys ? '못 찾았어요' : '토스증권 키를 등록하면 찾을 수 있어요' }));
+        for (const s of found) {
+          const b = el('button', { type: 'button' }, el('span', { text: s.name }), el('small', { text: `${s.symbol} · ${s.market}` }));
+          b.onclick = () => { list.hidden = true; input.value = s.name; onPick(s); };
+          list.append(b);
+        }
+        list.hidden = false;
+      } catch (e) {}
+    }, 250);
+  });
+  input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 200));
+}
+searchBox($('addSearch'), $('addSuggest'), (s) => {
+  S.add = s;
+  $('addPicked').textContent = `${s.name} (${s.symbol})`;
+  requestRanking(s.symbol);
+  fillAddStrategies();
+});
+searchBox($('simSearch'), $('simSuggest'), (s) => { const x = slotOf(s.symbol); simPick(s.symbol, s.name, x ? x.strategy.name : ''); });
+$('addClose').onclick = () => { $('addBox').hidden = true; };
+
+function rankedFor(symbol) {
+  const rk = S.data.rankings && S.data.rankings[symbol];
+  if (rk && rk.results && rk.results.length) return rk.results;
+  return S.data.strategies;
+}
+function optionText(r) {
+  const tag = strat(r.name).stock_only ? ' · 주식 전용' : '';
+  return r.rank ? `${r.rank <= 3 ? MEDALS[r.rank - 1] : r.rank + '위'} ${r.label} (${pct(r.total_return * 100, 0)})${tag}` : r.label + tag;
+}
+function fillAddStrategies() {
+  const sel = $('addStrategy'), keep = sel.value;
+  sel.innerHTML = '';
+  const sym = S.add && S.add.symbol, rk = sym && S.data.rankings[sym];
+  for (const r of sym ? rankedFor(sym) : S.data.strategies) sel.append(el('option', { value: r.name, text: optionText(r) }));
+  if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+  $('addRankNote').textContent = !sym ? '' : rk && rk.results ? `(최근 3년 순위)` : rk && rk.error ? `(${rk.error})` : '(순위 계산 중…)';
+  showAddGuide();
+}
+function showAddGuide() {
+  const g = strat($('addStrategy').value);
+  $('addGuide').hidden = !g.guide;
+  $('addGuide').innerHTML = '';
+  if (g.guide) $('addGuide').append(el('b', { text: `💡 ${g.label} · ` }), fmtGuide(g.guide));
+}
+$('addStrategy').onchange = showAddGuide;
+$('addGo').onclick = () => {
+  if (!S.add) { toast('종목을 먼저 골라 주세요', 'bad'); $('addSearch').focus(); return; }
+  send({ action: 'add', symbol: S.add.symbol, name: S.add.name, strategy: $('addStrategy').value, amount: Number($('addAmount').value) || 0 },
+       $('addPin'), () => { $('addBox').hidden = true; $('addSearch').value = ''; $('addAmount').value = ''; $('addPin').value = ''; S.add = null;
+                            $('addPicked').textContent = '종목을 먼저 골라 주세요'; });
+};
+async function requestRanking(symbol) {
+  if (!symbol || Date.now() - (S.requested[symbol] || 0) < 60000) return;
+  S.requested[symbol] = Date.now();
+  try { await postJSON('/api/stock/ranking', { symbol }); } catch (e) {}
+}
+
+// ---------- 계좌 설정 ----------
+S.mode = null;
+function renderSettings(d) {
+  const s = d.status;
+  if (S.mode == null) S.mode = s.mode;
+  $('modePaper').setAttribute('aria-pressed', S.mode === 'paper');
+  $('modeLive').setAttribute('aria-pressed', S.mode === 'live');
+  $('modeLive').disabled = !d.keys;
+  $('keyState').textContent = d.keys ? '✅ 토스증권 키 연결됨' : '🔑 키 없음 · 파이에서 python3 -m mypie.toss';
+  $('confirmRow').hidden = !(S.mode === 'live' && s.mode !== 'live');
+  $('modeGo').disabled = !d.pin_set || S.mode === s.mode;
+  if (!d.pin_set) $('modeMsg').textContent = '설정을 바꾸려면 PIN이 필요해요. 파이에서 python3 -m mypie.pin 으로 만들어 주세요.';
+}
+$('modePaper').onclick = () => { S.mode = 'paper'; renderSettings(S.data); };
+$('modeLive').onclick = () => { S.mode = 'live'; renderSettings(S.data); };
+$('modeGo').onclick = () => {
+  if (S.mode === 'live' && !$('confirmLive').checked) { toast("'실제 돈으로 주문이 나간다'에 체크해 주세요", 'bad'); return; }
+  if (!confirm(S.mode === 'live' ? '실거래로 바꿀까요?\n\n⚠️ 토스증권 계좌에 실제 주문이 나가요. 계좌 현금은 실거래 금고로 들어와요.' : '모의투자로 바꿀까요?')) return;
+  send({ action: 'mode', mode: S.mode, confirm_live: $('confirmLive').checked }, $('modePin'), () => { $('modePin').value = ''; $('confirmLive').checked = false; S.mode = null; });
+};
+
+// ---------- 요청 결과 · 기록 ----------
+function renderResults(results) {
+  for (const r of results || []) {
+    if (!S.mine[r.id]) continue;
+    delete S.mine[r.id];
+    toast((r.ok ? '✅ ' : '⚠️ ') + r.message, r.ok ? 'ok' : 'bad');
+  }
+}
+function renderTrades(trades) {
+  const body = $('trades'); body.innerHTML = '';
+  $('tradesEmpty').hidden = !!(trades && trades.length);
+  const names = Object.fromEntries(slots().map(x => [x.symbol, x.name]));
+  for (const t of trades || []) {
+    const tr = el('tr');
+    cell(tr, t.ts.slice(5, 16), 'left');
+    cell(tr, names[t.market] || t.market, 'left');
+    const side = cell(tr, t.side === 'buy' ? '매수' : '매도', 'side'); tone(side, t.side === 'buy' ? 1 : -1);
+    cell(tr, won(t.price)); cell(tr, Math.round(t.volume).toLocaleString() + '주'); cell(tr, won(t.krw));
+    const p = cell(tr, t.profit == null ? '-' : signedWon(t.profit)); tone(p, t.profit);
+    body.append(tr);
+  }
+  $('tradesSub').textContent = S.data.status ? (S.data.status.mode === 'live' ? '실거래' : '모의투자') : '';
+  const newest = trades && trades[0] && trades[0].id;
+  if (S.seen != null && newest && newest !== S.seen) toast(`${trades[0].side === 'buy' ? '🔴 매수' : '🔵 매도'} ${names[trades[0].market] || trades[0].market}`, 'info');
+  if (newest) S.seen = newest;
+}
+function renderEvents(events) {
+  const list = $('events'); list.innerHTML = '';
+  if (!events || !events.length) { list.append(el('li', { class: 'empty', text: '이벤트가 없어요' })); return; }
+  for (const e of events.slice(0, 30)) list.append(el('li', {}, el('time', { text: e.ts.slice(5, 16) }), el('span', { class: e.level, text: e.message })));
+}
+function renderGuides() {
+  const box = $('guideList'); box.innerHTML = '';
+  for (const g of S.data.strategies) {
+    const head = el('summary', {}, g.label);
+    if (g.stock_only) head.append(el('span', { class: 'tagline', text: '주식 전용' }));
+    head.append(el('span', { text: ' · ' + fmtGuide(g.description) }));
+    box.append(el('details', {}, head, el('p', { text: fmtGuide(g.guide) })));
+  }
+  S.guidesDone = true;
+}
+
+// ---------- 장 시계 ----------
+function tick() {
+  const now = Date.now() + S.offset;
+  $('clock').textContent = new Date(now + 9 * 3600e3).toISOString().slice(11, 19) + ' KST';
+  const s = S.data && S.data.status;
+  if (!s) return;
+  let target, label, period;
+  if (s.session === 'open' || s.session === 'closing') {
+    const close = parseTs(`${s.today} 15:30:00`).getTime();
+    target = close; label = s.session === 'open' ? '장 마감(15:30)까지 · 15:20부터는 새 주문 안 냄' : '마감 동시호가 중'; period = 6.5 * 3600e3;
+    $('sessLabel').textContent = '🟢 장 열림';
+  } else {
+    target = parseTs(s.next_open).getTime(); label = `다음 장 시작 ${s.next_open.slice(5, 16)}`; period = 24 * 3600e3;
+    $('sessLabel').textContent = '⚪ ' + s.session_text;
+  }
+  const left = Math.max(0, target - now);
+  const h = Math.floor(left / 3600e3), m = Math.floor(left % 3600e3 / 60e3), sec = Math.floor(left % 60e3 / 1e3);
+  $('countdown').textContent = (h >= 24 ? Math.floor(h / 24) + '일 ' : '') + [h % 24, m, sec].map(v => String(v).padStart(2, '0')).join(':');
+  $('countSub').textContent = label;
+  $('ringArc').setAttribute('stroke-dashoffset', (201 * Math.min(1, left / period)).toFixed(1));
+}
+
+// ---------- 가격 차트 ----------
+function renderPills() {
+  const box = $('chartPills'); box.innerHTML = '';
+  for (const x of slots()) {
+    const b = el('button', { class: 'pill', type: 'button', 'aria-pressed': x.symbol === S.sel, text: x.name });
+    b.onclick = () => selectSymbol(x.symbol);
+    box.append(b);
+  }
+}
+function selectSymbol(sym) {
+  S.sel = sym;
+  refreshCandles();
+  const x = slotOf(sym);
+  if (x && (!S.simSel || S.simSel.symbol !== sym)) simPick(sym, x.name, x.strategy.name);
+  if (S.data && S.data.status) { renderPills(); renderSlots(S.data.status); }
+}
+$('rangeSeg').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button'); if (!b) return;
+  S.bars = +b.dataset.bars;
+  for (const x of $('rangeSeg').children) x.setAttribute('aria-pressed', x === b);
+  refreshCandles();
+});
+async function refreshCandles() {
+  if (!S.sel) return;
+  const sym = S.sel;
+  try { const c = await getJSON(`/api/stock/candles?symbol=${sym}&bars=${S.bars}`); if (sym === S.sel) { S.candles = c; renderCandles(); } } catch (e) {}
+}
+function renderCandles() {
+  const box = $('candleBox'), c = S.candles;
+  if (!c) return;
+  const x0 = slotOf(c.symbol), rows = (c.candles || []).slice();
+  const s = S.data.status;
+  if (x0 && x0.price && s && rows.length && rows[rows.length - 1].day < s.today && ['open', 'closing', 'after'].includes(s.session)) {
+    const prev = rows[rows.length - 1].close;  // 오늘 진행 중인 봉 (시가는 전날 종가로 대신)
+    rows.push({ day: s.today, open: prev, high: Math.max(prev, x0.price), low: Math.min(prev, x0.price), close: x0.price, volume: 0, live: true });
+  }
+  if (rows.length < 2) { box.innerHTML = '<div class="empty">일봉을 모으는 중이에요 (처음 만든 종목은 1분쯤 걸려요)</div>'; $('candleLegend').innerHTML = ''; requestRanking(c.symbol); return; }
+  const W = Math.max(320, box.clientWidth), H = W < 600 ? 260 : 320, padR = 70, padT = 10, volH = 40, gap = 10;
+  const priceH = H - volH - gap - 22;
+  const levels = [];
+  const p = x0 && x0.plan;
+  if (p && p.buy_stop != null && !x0.holding) levels.push({ v: p.buy_stop, label: '매수 목표', color: 'var(--up)' });
+  if (p && p.sell_stop != null && x0.holding) levels.push({ v: p.sell_stop, label: '매도 기준', color: 'var(--down)' });
+  if (x0 && x0.holding && x0.avg_price) levels.push({ v: x0.avg_price, label: '평균 매수가', color: 'var(--brand)' });
+  let lo = Math.min(...rows.map(r => r.low)), hi = Math.max(...rows.map(r => r.high));
+  for (const l of levels) { lo = Math.min(lo, l.v); hi = Math.max(hi, l.v); }
+  const pad = (hi - lo) * 0.06 || hi * 0.01; lo -= pad; hi += pad;
+  const n = rows.length, step = (W - padR) / n, bw = Math.max(1, Math.min(10, step * 0.65));
+  const x = (i) => step * i + step / 2, y = (v) => padT + (hi - v) / (hi - lo) * priceH;
+  const vmax = Math.max(...rows.map(r => r.volume || 0)) || 1;
+  const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': '가격 차트' });
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4;
+    root.append(svg('line', { x1: 0, x2: W - padR, y1: y(v), y2: y(v), stroke: 'var(--line)' }));
+    const t = svg('text', { x: W - padR + 6, y: y(v) + 4, 'font-size': 11, fill: 'var(--muted)' }); t.textContent = compact(v); root.append(t);
+  }
+  const every = Math.ceil(n / (W < 600 ? 4 : 7));
+  rows.forEach((r, i) => {
+    const up = r.close >= r.open, color = up ? 'var(--up)' : 'var(--down)', cx = x(i);
+    root.append(svg('line', { x1: cx, x2: cx, y1: y(r.high), y2: y(r.low), stroke: color }));
+    root.append(svg('rect', { x: cx - bw / 2, y: y(Math.max(r.open, r.close)), width: bw, height: Math.max(1, Math.abs(y(r.open) - y(r.close))), fill: color, rx: 1, opacity: r.live ? .55 : 1 }));
+    if (r.volume) { const vh = r.volume / vmax * volH; root.append(svg('rect', { x: cx - bw / 2, y: H - 22 - vh, width: bw, height: vh, fill: color, opacity: .28 })); }
+    if (i % every === 0) { const t = svg('text', { x: cx, y: H - 6, 'font-size': 11, fill: 'var(--muted)', 'text-anchor': 'middle' }); t.textContent = r.day.slice(5); root.append(t); }
+  });
+  for (const l of levels) {
+    root.append(svg('line', { x1: 0, x2: W - padR, y1: y(l.v), y2: y(l.v), stroke: l.color, 'stroke-dasharray': '5 4', 'stroke-width': 1.3 }));
+    const t = svg('text', { x: 6, y: y(l.v) - 5, 'font-size': 11, fill: l.color, 'font-weight': 700 }); t.textContent = `${l.label} ${won(l.v)}`; root.append(t);
+  }
+  const index = Object.fromEntries(rows.map((r, i) => [r.day, i]));
+  for (const t of c.trades || []) {
+    const i = index[t.ts.slice(0, 10)]; if (i == null) continue;
+    const r = rows[i], buy = t.side === 'buy', cx = x(i), yy = buy ? y(r.low) + 12 : y(r.high) - 12;
+    const tri = buy ? `${cx},${yy - 6} ${cx - 6},${yy + 5} ${cx + 6},${yy + 5}` : `${cx},${yy + 6} ${cx - 6},${yy - 5} ${cx + 6},${yy - 5}`;
+    root.append(svg('polygon', { points: tri, fill: buy ? 'var(--up)' : 'var(--down)', stroke: 'var(--card)', 'stroke-width': 1.5 }));
+  }
+  const cross = svg('line', { x1: 0, x2: 0, y1: padT, y2: H - 22, stroke: 'var(--muted)', 'stroke-dasharray': '3 3', opacity: 0 });
+  root.append(cross);
+  box.innerHTML = '';
+  const tip = el('div', { class: 'tip' }); tip.hidden = true;
+  box.append(root, tip);
+  root.addEventListener('pointermove', (ev) => {
+    const rect = root.getBoundingClientRect(), i = Math.max(0, Math.min(n - 1, Math.floor((ev.clientX - rect.left) * W / rect.width / step))), r = rows[i];
+    cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('opacity', .7);
+    const prev = rows[i - 1], chg = prev ? (r.close / prev.close - 1) * 100 : null;
+    tip.innerHTML = '';
+    tip.append(el('b', { text: r.day + (r.live ? ' (진행 중)' : '') }), el('div', { text: `시가 ${won(r.open)} · 고가 ${won(r.high)}` }),
+               el('div', { text: `저가 ${won(r.low)} · 종가 ${won(r.close)}` }));
+    if (chg != null) { const d = el('div', { text: `전날 대비 ${pct(chg)}` }); tone(d, chg); tip.append(d); }
+    tip.hidden = false;
+    tip.style.left = Math.min(x(i) * rect.width / W + 12, rect.width - 190) + 'px'; tip.style.top = '10px';
+  });
+  root.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('opacity', 0); });
+  $('candleLegend').innerHTML = '';
+  $('candleLegend').append(el('span', {}, el('i', { style: 'background:var(--up)' }), '상승 · ▲매수'), el('span', {}, el('i', { style: 'background:var(--down)' }), '하락 · ▼매도'),
+                           el('span', { text: `${x0 ? x0.name : c.symbol} · ${rows[0].day} ~ ${rows[n - 1].day}` }));
+}
+
+// ---------- 전략 시뮬레이션 ----------
+function simPick(symbol, name, strategy) {
+  const prev = S.simSel;
+  S.simSel = { symbol, name, strategy: strategy || (prev ? prev.strategy : ''), days: prev ? prev.days : 365 };
+  $('simSearch').value = name;
+  refreshSim();
+}
+function simReady() { const r = S.sim, q = S.simSel; return r && r.ready && q && r.market === q.symbol; }
+function simTick() {
+  const r = S.sim;
+  if (r && (r.need_data || r.stale) && Date.now() - (S.simAt || 0) > 15000 && (S.simTries || 0) < 8) { S.simTries = (S.simTries || 0) + 1; refreshSim(true); }
+}
+async function refreshSim(auto) {
+  const q = S.simSel; if (!q) return;
+  if (!auto) S.simTries = 0;
+  renderSimControls();
+  const id = S.simSeq = S.simSeq + 1;
+  if (!auto) $('simLine').textContent = '파이가 계산하는 중이에요… (처음 고른 종목은 몇 초 걸려요)';
+  try {
+    const r = await getJSON(`/api/stock/simulate?symbol=${q.symbol}&days=${q.days}&strategy=${q.strategy || ''}`);
+    if (id !== S.simSeq) return;
+    S.sim = r; S.simAt = Date.now();
+    if (r.ready) { q.days = r.days; q.strategy = r.detail.name; }
+    if (r.need_data || r.stale) requestRanking(q.symbol);
+    renderSim();
+  } catch (e) { if (id === S.simSeq) $('simLine').textContent = '계산하지 못했어요. 잠시 뒤 다시 골라 보세요.'; }
+}
+function renderSimControls() {
+  const q = S.simSel;
+  const ss = $('simStrategy'); ss.innerHTML = '';
+  for (const r of simReady() ? S.sim.results : S.data.strategies) ss.append(el('option', { value: r.name, text: optionText(r) }));
+  ss.value = q.strategy || ss.options[0].value;
+  const ds = $('simDays'); ds.innerHTML = '';
+  const periods = S.sim && S.sim.market === q.symbol && S.sim.periods && S.sim.periods.length ? S.sim.periods : S.data.periods.map(p => ({ ...p, ok: true }));
+  for (const p of periods) { const o = el('option', { value: p.days, text: `최근 ${p.label}` + (p.ok ? '' : ' (데이터 부족)') }); o.disabled = !p.ok; ds.append(o); }
+  ds.value = q.days;
+}
+$('simStrategy').onchange = () => { S.simSel.strategy = $('simStrategy').value; refreshSim(); };
+$('simDays').onchange = () => { S.simSel.days = +$('simDays').value; refreshSim(); };
+function renderSim() {
+  renderSimControls();
+  renderRankTable();
+  const r = S.sim;
+  if (!simReady()) {
+    $('simLine').textContent = r && r.message ? r.message : '계산하는 중이에요…';
+    $('simTiles').innerHTML = ''; $('simBox').innerHTML = ''; $('simLegend').innerHTML = '';
+    return;
+  }
+  const d = r.detail, res = r.results.find(x => x.name === d.name), hold = r.results.find(x => x.name === 'buy_and_hold') || res;
+  const period = r.periods.find(p => p.days === r.days);
+  const fin = SIM_BASE * (1 + res.total_return), hfin = SIM_BASE * (1 + hold.total_return), diff = (res.total_return - hold.total_return) * 100;
+  const name = S.simSel.name, line = $('simLine'); line.innerHTML = '';
+  line.append(`최근 ${period ? period.label : r.days + '일'}(${r.from} ~ ${r.to}) 동안 ${name}${josa(name, '을', '를')} `,
+    el('b', { text: `'${res.label}'` }), `${josa(res.label, '으로', '로')} 사고팔았다면 100만 원이 `,
+    el('b', { class: res.total_return > 0 ? 'up' : res.total_return < 0 ? 'down' : '', text: `${won(fin)}(${pct(res.total_return * 100, 1)})` }),
+    '이 됐어요. ' + (d.name === 'buy_and_hold' ? '' : `그냥 사서 들고 있었다면 ${won(hfin)}(${pct(hold.total_return * 100, 1)})이었으니 ` +
+      (Math.abs(diff) < 0.05 ? '거의 같아요. ' : `${Math.abs(diff).toFixed(1)}%p ${diff > 0 ? '더 벌었어요' : '덜 벌었어요'}. `)) +
+    (d.holding ? '마지막엔 주식을 들고 있었어요.' : '마지막엔 현금으로 기다리고 있었어요.') + (r.stale ? ' (최근 일봉을 받아 오는 중)' : ''));
+  const tiles = $('simTiles'); tiles.innerHTML = '';
+  const tile = (label, v, sub, n) => {
+    const t = el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'v num', text: v }));
+    if (sub) t.append(el('div', { class: 'sub', text: sub }));
+    if (n != null) tone(t.querySelector('.v'), n);
+    tiles.append(t);
+  };
+  tile('100만 원 →', won(fin), pct(res.total_return * 100, 1), res.total_return);
+  tile('그냥 들고 있었다면', won(hfin), pct(hold.total_return * 100, 1), hold.total_return);
+  tile('가장 크게 빠졌을 때', pct(res.mdd * 100, 1), '고점 대비 최대 낙폭', res.mdd < 0 ? -1 : 0);
+  tile('사고판 횟수', `${res.trades}번`, res.win_rate == null ? '아직 판 적 없음' : `이긴 비율 ${Math.round(res.win_rate * 100)}%`);
+  tile('이 기간 순위', `${res.rank}위`, `전략 ${r.results.length}개 중`);
+  drawSim();
+}
+function drawSim() {
+  const box = $('simBox'), r = S.sim;
+  if (!simReady()) return;
+  const d = r.detail, n = d.close.length;
+  const W = Math.max(320, box.clientWidth), H = W < 600 ? 320 : 380, padR = 70, padT = 22, gap = 30, xlab = 20;
+  const priceH = Math.round((H - padT - gap - xlab) * 0.56), eqH = H - padT - gap - xlab - priceH, top2 = padT + priceH + gap;
+  const x = (i) => n > 1 ? i / (n - 1) * (W - padR) : 0;
+  let lo = Math.min(...d.close), hi = Math.max(...d.close);
+  for (const f of d.fills) { lo = Math.min(lo, f.price); hi = Math.max(hi, f.price); }
+  const pad = (hi - lo) * 0.1 || hi * 0.01; lo -= pad; hi += pad;
+  const yp = (v) => padT + (hi - v) / (hi - lo) * priceH;
+  let elo = Math.min(1, ...d.equity, ...d.hold), ehi = Math.max(1, ...d.equity, ...d.hold);
+  const epad = (ehi - elo) * 0.08 || 0.01; elo -= epad; ehi += epad;
+  const ye = (v) => top2 + (ehi - v) / (ehi - elo) * eqH;
+  const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': '전략 시뮬레이션 차트' });
+  const text = (tx, xx, yy, attrs = {}) => { const t = svg('text', { x: xx, y: yy, 'font-size': 11, fill: 'var(--muted)', ...attrs }); t.textContent = tx; root.append(t); };
+  let start = null; const spans = [];
+  for (const f of d.fills) { if (f.side === 'buy') start = f.i; else if (start != null) { spans.push([start, f.i]); start = null; } }
+  if (start != null) spans.push([start, n - 1]);
+  for (const [a, b] of spans) root.append(svg('rect', { x: x(a), y: padT, width: Math.max(2, x(b) - x(a)), height: priceH, fill: 'var(--brand)', opacity: .09 }));
+  for (const v of [hi - pad, (hi + lo) / 2, lo + pad]) { root.append(svg('line', { x1: 0, x2: W - padR, y1: yp(v), y2: yp(v), stroke: 'var(--line)' })); text(compact(v), W - padR + 6, yp(v) + 4); }
+  root.append(svg('polyline', { points: d.close.map((v, i) => `${x(i).toFixed(1)},${yp(v).toFixed(1)}`).join(' '), fill: 'none', stroke: 'var(--text)', opacity: .7, 'stroke-width': 1.3 }));
+  for (const f of d.fills) {
+    const cx = x(f.i), buy = f.side === 'buy', yy = buy ? yp(f.price) + 9 : yp(f.price) - 9;
+    const tri = buy ? `${cx},${yy - 6} ${cx - 6},${yy + 5} ${cx + 6},${yy + 5}` : `${cx},${yy + 6} ${cx - 6},${yy - 5} ${cx + 6},${yy - 5}`;
+    root.append(svg('polygon', { points: tri, fill: buy ? 'var(--up)' : 'var(--down)', stroke: 'var(--card)', 'stroke-width': 1.2 }));
+  }
+  text('가격 · ▲샀을 때 ▼팔았을 때 · 색칠한 곳은 주식을 들고 있던 때', 0, 13, { 'font-weight': 600 });
+  for (const v of [ehi - epad, 1, elo + epad]) { root.append(svg('line', { x1: 0, x2: W - padR, y1: ye(v), y2: ye(v), stroke: 'var(--line)', 'stroke-dasharray': v === 1 ? '4 4' : '' })); text(pct((v - 1) * 100, 0), W - padR + 6, ye(v) + 4); }
+  const path = (vals) => vals.map((v, i) => `${x(i).toFixed(1)},${ye(v).toFixed(1)}`).join(' ');
+  root.append(svg('polyline', { points: path(d.hold), fill: 'none', stroke: 'var(--c5)', 'stroke-width': 1.5, 'stroke-dasharray': '5 4' }));
+  root.append(svg('polyline', { points: path(d.equity), fill: 'none', stroke: 'var(--brand)', 'stroke-width': 2.4 }));
+  text('내 돈 (100만 원으로 시작)', 0, top2 - 8, { 'font-weight': 600 });
+  const ticks = W < 600 ? 3 : 5;
+  for (let k = 0; k <= ticks; k++) { const i = Math.round((n - 1) * k / ticks); text(d.keys[i].slice(2), x(i), H - 4, { 'text-anchor': k === 0 ? 'start' : k === ticks ? 'end' : 'middle' }); }
+  const cross = svg('line', { x1: 0, x2: 0, y1: padT, y2: top2 + eqH, stroke: 'var(--muted)', 'stroke-dasharray': '3 3', opacity: 0 });
+  root.append(cross);
+  box.innerHTML = '';
+  const tip = el('div', { class: 'tip' }); tip.hidden = true;
+  box.append(root, tip);
+  const byBar = {}; for (const f of d.fills) (byBar[f.i] = byBar[f.i] || []).push(f);
+  root.addEventListener('pointermove', (ev) => {
+    const rect = root.getBoundingClientRect(), i = Math.max(0, Math.min(n - 1, Math.round((ev.clientX - rect.left) * W / rect.width / (W - padR) * (n - 1))));
+    cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('opacity', .7);
+    tip.innerHTML = '';
+    tip.append(el('b', { text: d.keys[i] }), el('div', { text: `종가 ${won(d.close[i])}` }),
+               el('div', { text: `이 전략 ${won(SIM_BASE * d.equity[i])} (${pct((d.equity[i] - 1) * 100, 1)})` }), el('div', { text: `그냥 들고 있기 ${pct((d.hold[i] - 1) * 100, 1)}` }));
+    for (const f of byBar[i] || []) { const fd = el('div', { text: f.side === 'buy' ? `▲ 삼 ${won(f.price)}` : `▼ 팜 ${won(f.price)} (${pct(f.return * 100, 1)})` }); fd.className = f.side === 'buy' ? 'up' : 'down'; tip.append(fd); }
+    tip.hidden = false; tip.style.left = Math.min(x(i) * rect.width / W + 12, rect.width - 200) + 'px'; tip.style.top = '24px';
+  });
+  root.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('opacity', 0); });
+  $('simLegend').innerHTML = '';
+  $('simLegend').append(el('span', {}, el('i', { style: 'background:var(--brand)' }), `${r.results.find(v => v.name === d.name).label} (이 전략)`),
+                        el('span', {}, el('i', { style: 'background:var(--c5)' }), '그냥 사서 들고 있기'), el('span', { text: `${d.fills.length}번 사고팖` }));
+}
+function spark(curve) {
+  const W = 90, H = 24, root = svg('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}` });
+  if (!curve || curve.length < 2) return root;
+  const lo = Math.min(...curve, 1), hi = Math.max(...curve, 1), span = hi - lo || 1, y = (v) => 2 + (hi - v) / span * (H - 4);
+  root.append(svg('polyline', { points: curve.map((v, i) => `${(i / (curve.length - 1) * W).toFixed(1)},${y(v).toFixed(1)}`).join(' '),
+                                fill: 'none', 'stroke-width': 1.5, stroke: curve[curve.length - 1] >= 1 ? 'var(--up)' : 'var(--down)' }));
+  return root;
+}
+function renderRankTable() {
+  const body = $('ranks'); body.innerHTML = '';
+  if (!simReady()) { $('rankHead').textContent = '같은 기간 전략 순위'; return; }
+  const r = S.sim, period = r.periods.find(p => p.days === r.days), x = slotOf(r.market);
+  $('rankHead').textContent = `같은 기간(최근 ${period ? period.label : r.days + '일'}) ${r.results.length}개 전략 순위 · ${r.rank_by === 'calmar' ? '위험 대비 수익 순' : '수익률 순'}`;
+  for (const v of r.results) {
+    const g = strat(v.name), tr = el('tr', { title: fmtGuide(g.guide || '') });
+    if (v.name === r.detail.name) tr.className = 'active';
+    cell(tr, v.rank <= 3 ? MEDALS[v.rank - 1] : v.rank + '위', 'left' + (v.rank <= 3 ? ' medal' : ''));
+    const nm = cell(tr, v.label, 'left');
+    if (g.stock_only) nm.append(el('span', { class: 'tagline', text: '주식 전용' }));
+    if (x && x.strategy.name === v.name) nm.append(el('span', { class: 'tag', text: '사용 중' }));
+    tone(cell(tr, pct(v.total_return * 100, 1)), v.total_return);
+    tone(cell(tr, v.cagr == null ? '-' : pct(v.cagr * 100, 1)), v.cagr);
+    cell(tr, pct(v.mdd * 100, 1), v.mdd < 0 ? 'down' : '');
+    cell(tr, v.win_rate == null ? '-' : Math.round(v.win_rate * 100) + '%');
+    cell(tr, v.trades + '회');
+    cell(tr, '').appendChild(spark(v.curve));
+    tr.onclick = () => { S.simSel.strategy = v.name; refreshSim(); $('simLine').scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+    body.append(tr);
+  }
+}
+
+// ---------- 불러오기 ----------
+$('logout').onclick = async () => { try { await postJSON('/api/logout', {}); } catch (e) {} location.href = '/'; };
+async function refresh() {
+  try { S.data = await getJSON('/api/stock/status'); renderAll(); } catch (e) { setBeat('bad', '파이에 연결할 수 없어요'); }
+}
+window.addEventListener('resize', () => { if (S.candles) renderCandles(); drawSim(); if (S.data && S.data.status && S.data.status.account) renderEquity(S.data.equity, S.data.status.account.contributions); });
+refresh();
+setInterval(refresh, 5000);
+setInterval(refreshCandles, 60000);
+setInterval(tick, 1000); tick();
+</script>
+</body>
+</html>

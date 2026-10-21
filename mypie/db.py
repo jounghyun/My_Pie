@@ -103,6 +103,12 @@ class Database:
         with self.conn:
             self.conn.execute("DELETE FROM kv WHERE key = ?", (key,))
 
+    def states(self, prefix: str) -> list[tuple[str, object]]:
+        """이름이 prefix로 시작하는 값들 (이름 순). 웹페이지가 하나씩 쌓는 요청을 봇이 차례로 꺼낼 때 쓴다."""
+        rows = self.conn.execute("SELECT key, value FROM kv WHERE key LIKE ? ORDER BY key",
+                                 (prefix.replace("%", "") + "%",)).fetchall()
+        return [(row["key"], json.loads(row["value"])) for row in rows]
+
     def upsert_candles(self, market: str, candles: list[dict], tf: str = "1d") -> None:
         with self.conn:
             self.conn.executemany(
