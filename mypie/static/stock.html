@@ -142,7 +142,7 @@
   <section class="card" id="chart">
     <h2><span class="ico">📈</span>가격 차트 <small id="chartSub">일봉 · ▲매수 ▼매도</small>
       <span class="right seg" id="rangeSeg">
-        <button type="button" data-bars="60">3달</button><button type="button" data-bars="120" aria-pressed="true">6달</button><button type="button" data-bars="250">1년</button>
+        <button type="button" data-span="1d">1일</button><button type="button" data-span="1w">1주</button><button type="button" data-bars="22">1달</button><button type="button" data-bars="60">3달</button><button type="button" data-bars="120" aria-pressed="true">6달</button><button type="button" data-bars="250">1년</button>
       </span>
     </h2>
     <div class="pills" id="chartPills"></div>
@@ -267,7 +267,7 @@ function fmtGuide(text) {
   return (text || '').replace(/\{(N:(\d+)|prev|cur|next|hold)\}/g, (_, t, n) => n ? `${n}거래일` : words[t]);
 }
 
-const S = { data: null, offset: 0, sel: null, bars: 120, candles: null, sim: null, simSel: null, simSeq: 0,
+const S = { data: null, offset: 0, sel: null, bars: 120, span: null, candles: null, sim: null, simSel: null, simSeq: 0,
             pin: '', open: {}, seen: null, mine: {}, add: null, guidesDone: false, requested: {} };
 const SIM_BASE = 1e6;
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -635,25 +635,41 @@ function selectSymbol(sym) {
 }
 $('rangeSeg').addEventListener('click', (ev) => {
   const b = ev.target.closest('button'); if (!b) return;
-  S.bars = +b.dataset.bars;
+  S.span = b.dataset.span || null;  // 1일·1주는 분봉, 나머지는 일봉 개수
+  if (b.dataset.bars) S.bars = +b.dataset.bars;
   for (const x of $('rangeSeg').children) x.setAttribute('aria-pressed', x === b);
   refreshCandles();
 });
 async function refreshCandles() {
   if (!S.sel) return;
   const sym = S.sel;
-  try { const c = await getJSON(`/api/stock/candles?symbol=${sym}&bars=${S.bars}`); if (sym === S.sel) { S.candles = c; renderCandles(); } } catch (e) {}
+  const range = S.span ? `span=${S.span}` : `bars=${S.bars}`;
+  try { const c = await getJSON(`/api/stock/candles?symbol=${sym}&${range}`); if (sym === S.sel) { S.candles = c; renderCandles(); } } catch (e) {}
 }
 function renderCandles() {
   const box = $('candleBox'), c = S.candles;
   if (!c) return;
   const x0 = slotOf(c.symbol), rows = (c.candles || []).slice();
   const s = S.data.status;
-  if (x0 && x0.price && s && rows.length && rows[rows.length - 1].day < s.today && ['open', 'closing', 'after'].includes(s.session)) {
-    const prev = rows[rows.length - 1].close;  // 오늘 진행 중인 봉 (시가는 전날 종가로 대신)
+  if (!c.intraday && x0 && x0.price && s && rows.length && rows[rows.length - 1].day < s.today && ['open', 'closing', 'after'].includes(s.session)) {
+    const prev = rows[rows.length - 1].close;  // 오늘 진행 중인 봉 (시가는 전날 종가로 대신). 분봉은 진행 중인 봉까지 받아 온다
     rows.push({ day: s.today, open: prev, high: Math.max(prev, x0.price), low: Math.min(prev, x0.price), close: x0.price, volume: 0, live: true });
   }
-  if (rows.length < 2) { box.innerHTML = '<div class="empty">일봉을 모으는 중이에요 (처음 만든 종목은 1분쯤 걸려요)</div>'; $('candleLegend').innerHTML = ''; requestRanking(c.symbol); return; }
+  if (rows.length < 2) {
+    box.innerHTML = '';
+    box.append(el('div', { class: 'empty', text: c.message || (c.intraday ? '분봉을 받는 중이에요' : '일봉을 모으는 중이에요 (처음 만든 종목은 1분쯤 걸려요)') }));
+    $('candleLegend').innerHTML = '';
+    if (!c.intraday) requestRanking(c.symbol);
+    return;
+  }
+  // 1일은 시각만, 1주는 날짜와 시각, 일봉은 날짜
+  const label = (key) => !c.intraday ? key.slice(5) : c.span === '1d' ? key.slice(11) : `${key.slice(5, 10)} ${key.slice(11)}`;
+  const tradeKey = (tsStr) => {  // 매매 시각 → 그 매매가 들어간 봉의 키
+    if (!c.intraday) return tsStr.slice(0, 10);
+    const [h, m] = tsStr.slice(11, 16).split(':').map(Number), mins = Math.floor((h * 60 + m - 540) / c.minutes) * c.minutes + 540;
+    return `${tsStr.slice(0, 10)}T${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  };
+  $('chartSub').textContent = `${c.intraday ? c.minutes + '분봉' : '일봉'} · ▲매수 ▼매도`;
   const W = Math.max(320, box.clientWidth), H = W < 600 ? 260 : 320, padR = 70, padT = 10, volH = 40, gap = 10;
   const priceH = H - volH - gap - 22;
   const levels = [];
@@ -679,7 +695,7 @@ function renderCandles() {
     root.append(svg('line', { x1: cx, x2: cx, y1: y(r.high), y2: y(r.low), stroke: color }));
     root.append(svg('rect', { x: cx - bw / 2, y: y(Math.max(r.open, r.close)), width: bw, height: Math.max(1, Math.abs(y(r.open) - y(r.close))), fill: color, rx: 1, opacity: r.live ? .55 : 1 }));
     if (r.volume) { const vh = r.volume / vmax * volH; root.append(svg('rect', { x: cx - bw / 2, y: H - 22 - vh, width: bw, height: vh, fill: color, opacity: .28 })); }
-    if (i % every === 0) { const t = svg('text', { x: cx, y: H - 6, 'font-size': 11, fill: 'var(--muted)', 'text-anchor': 'middle' }); t.textContent = r.day.slice(5); root.append(t); }
+    if (i % every === 0) { const t = svg('text', { x: cx, y: H - 6, 'font-size': 11, fill: 'var(--muted)', 'text-anchor': 'middle' }); t.textContent = label(r.day); root.append(t); }
   });
   for (const l of levels) {
     root.append(svg('line', { x1: 0, x2: W - padR, y1: y(l.v), y2: y(l.v), stroke: l.color, 'stroke-dasharray': '5 4', 'stroke-width': 1.3 }));
@@ -687,7 +703,7 @@ function renderCandles() {
   }
   const index = Object.fromEntries(rows.map((r, i) => [r.day, i]));
   for (const t of c.trades || []) {
-    const i = index[t.ts.slice(0, 10)]; if (i == null) continue;
+    const i = index[tradeKey(t.ts)]; if (i == null) continue;
     const r = rows[i], buy = t.side === 'buy', cx = x(i), yy = buy ? y(r.low) + 12 : y(r.high) - 12;
     const tri = buy ? `${cx},${yy - 6} ${cx - 6},${yy + 5} ${cx + 6},${yy + 5}` : `${cx},${yy + 6} ${cx - 6},${yy - 5} ${cx + 6},${yy - 5}`;
     root.append(svg('polygon', { points: tri, fill: buy ? 'var(--up)' : 'var(--down)', stroke: 'var(--card)', 'stroke-width': 1.5 }));
@@ -702,16 +718,16 @@ function renderCandles() {
     cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('opacity', .7);
     const prev = rows[i - 1], chg = prev ? (r.close / prev.close - 1) * 100 : null;
     tip.innerHTML = '';
-    tip.append(el('b', { text: r.day + (r.live ? ' (진행 중)' : '') }), el('div', { text: `시가 ${won(r.open)} · 고가 ${won(r.high)}` }),
+    tip.append(el('b', { text: (c.intraday ? r.day.replace('T', ' ') + ' 시작' : r.day) + (r.live ? ' (진행 중)' : '') }), el('div', { text: `시가 ${won(r.open)} · 고가 ${won(r.high)}` }),
                el('div', { text: `저가 ${won(r.low)} · 종가 ${won(r.close)}` }));
-    if (chg != null) { const d = el('div', { text: `전날 대비 ${pct(chg)}` }); tone(d, chg); tip.append(d); }
+    if (chg != null) { const d = el('div', { text: `${c.intraday ? '직전 봉' : '전날'} 대비 ${pct(chg)}` }); tone(d, chg); tip.append(d); }
     tip.hidden = false;
     tip.style.left = Math.min(x(i) * rect.width / W + 12, rect.width - 190) + 'px'; tip.style.top = '10px';
   });
   root.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('opacity', 0); });
   $('candleLegend').innerHTML = '';
   $('candleLegend').append(el('span', {}, el('i', { style: 'background:var(--up)' }), '상승 · ▲매수'), el('span', {}, el('i', { style: 'background:var(--down)' }), '하락 · ▼매도'),
-                           el('span', { text: `${x0 ? x0.name : c.symbol} · ${rows[0].day} ~ ${rows[n - 1].day}` }));
+                           el('span', { text: `${x0 ? x0.name : c.symbol} · ${rows[0].day.replace('T', ' ')} ~ ${rows[n - 1].day.replace('T', ' ')}` }));
 }
 
 // ---------- 전략 시뮬레이션 ----------

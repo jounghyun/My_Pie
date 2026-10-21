@@ -24,7 +24,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -272,6 +272,67 @@ def build_stock_candles(stock_db: str, symbol: str, count: int) -> dict:
                 "trades": [{k: t[k] for k in ("ts", "side", "price", "profit", "volume")} for t in trades]}
     finally:
         db.close()
+
+
+INTRADAY_SPANS = {"1d": (5, 1), "1w": (30, 5)}  # 차트 기간 → (몇 분봉으로 묶을지, 거래일 수)
+INTRADAY_CACHE_SEC = 60
+_intraday_lock = threading.Lock()
+_intraday_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def build_stock_intraday(stock_db: str, symbol: str, span: str) -> dict:
+    """주식 차트 1일·1주: 토스증권에서 1분봉을 받아 5분·30분봉으로 묶는다 (정규장 09:00~15:30만).
+    토큰은 주식 봇 DB에 저장된 것을 같이 쓰고, 같은 차트는 1분 동안 다시 받지 않는다."""
+    out = {"symbol": symbol, "span": span, "intraday": True, "candles": [], "trades": []}
+    if not STOCK_SYMBOL.match(symbol) or span not in INTRADAY_SPANS:
+        return {**out, "message": "잘못된 요청이에요."}
+    creds = toss.load_credentials()
+    if not creds:
+        return {**out, "message": "토스증권 키를 등록하면 볼 수 있어요."}
+    with _intraday_lock:
+        hit = _intraday_cache.get((symbol, span))
+        if hit and time.monotonic() - hit[0] < INTRADAY_CACHE_SEC:
+            return hit[1]
+    minutes, days = INTRADAY_SPANS[span]
+    db = _open(stock_db)
+    if not db:
+        return {**out, "message": "주식 봇이 아직 시작되지 않았어요."}
+    try:
+        client = toss.TossClient(*creds, db=db)
+        bars, before = {}, None
+        for _ in range(40):  # 최신 → 과거로 받다가 거래일이 days개를 넘으면 그만
+            rows, before = client.minute_candles(symbol, before)
+            for r in rows:
+                start = datetime.fromisoformat(r["ts"]) - timedelta(minutes=1)  # 1분봉 시각은 끝난 시각
+                if "09:00" <= start.strftime("%H:%M") <= "15:30":
+                    bars[start] = r
+            if len({t.date() for t in bars}) > days or not rows or not before:
+                break
+        keep = sorted({t.date() for t in bars})[-days:]
+        candles: dict[str, dict] = {}
+        for start in sorted(t for t in bars if t.date() in keep):
+            r = bars[start]
+            open_at = start.replace(hour=9, minute=0)
+            bucket = open_at + timedelta(minutes=(start - open_at).seconds // 60 // minutes * minutes)
+            key = bucket.strftime("%Y-%m-%dT%H:%M")
+            c = candles.get(key)
+            if c is None:
+                candles[key] = {"day": key, "open": r["open"], "high": r["high"], "low": r["low"], "close": r["close"],
+                                "volume": r["volume"]}
+            else:
+                c.update(high=max(c["high"], r["high"]), low=min(c["low"], r["low"]), close=r["close"],
+                         volume=c["volume"] + r["volume"])
+        mode = (db.get_state("status") or {}).get("mode", "paper")
+        trades = db.trades(mode, symbol, f"{keep[0].isoformat()} 00:00:00") if keep else []
+    except toss.TossError as e:
+        return {**out, "message": str(e)}
+    finally:
+        db.close()
+    result = {**out, "minutes": minutes, "candles": list(candles.values()),
+              "trades": [{k: t[k] for k in ("ts", "side", "price", "profit", "volume")} for t in trades]}
+    with _intraday_lock:
+        _intraday_cache[(symbol, span)] = (time.monotonic(), result)
+    return result
 
 
 def request_stock(stock_db: str, main_db: str, data: dict) -> tuple[int, dict]:
@@ -779,8 +840,11 @@ class Handler(BaseHTTPRequestHandler):
             "/api/system": lambda: build_system(self.db_path),
             "/api/stock/status": lambda: build_stock_payload(self.stock_db_path, self.db_path),
             "/api/stock/search": lambda: stock_search(self.stock_db_path, query.get("q", [""])[0][:40]),
-            "/api/stock/candles": lambda: build_stock_candles(self.stock_db_path, query.get("symbol", [""])[0],
-                                                              max(20, min(int(query.get("bars", ["120"])[0]), 800))),
+            "/api/stock/candles": lambda: (
+                build_stock_intraday(self.stock_db_path, query.get("symbol", [""])[0], query["span"][0])
+                if query.get("span", [""])[0] in INTRADAY_SPANS else
+                build_stock_candles(self.stock_db_path, query.get("symbol", [""])[0],
+                                    max(20, min(int(query.get("bars", ["120"])[0]), 800)))),
             "/api/stock/simulate": lambda: build_stock_simulation(self.stock_db_path, self.cfg, query.get("symbol", [""])[0],
                                                                   int(query.get("days", ["0"])[0] or 0),
                                                                   query.get("strategy", [""])[0]),

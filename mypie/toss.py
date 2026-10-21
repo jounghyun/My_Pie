@@ -198,6 +198,15 @@ class TossClient:
             rows = [r for r in rows if r["day"] < before]
         return rows[:count]
 
+    def minute_candles(self, symbol: str, before: str | None = None) -> tuple[list[dict], str | None]:
+        """1분봉 200개 (최신 → 과거)와 그 앞을 받을 커서. 'ts'는 봉이 끝난 시각 (09:01 봉 = 09:00~09:01)."""
+        query = {"symbol": symbol, "interval": "1m", "count": 200, "before": before}
+        result = self._call("GET", "/api/v1/candles", query) or {}
+        rows = [{"ts": c["timestamp"][:16], "open": _num(c["openPrice"]), "high": _num(c["highPrice"]),
+                 "low": _num(c["lowPrice"]), "close": _num(c["closePrice"]), "volume": _num(c.get("volume"))}
+                for c in result.get("candles") or []]
+        return rows, result.get("nextBefore")
+
     def _today_info(self, symbol: str, today: str) -> dict:
         """오늘 시가와 전날 종가. 시가는 첫 거래가 생긴 뒤에 한 번 구하면 하루 동안 그대로 쓴다."""
         cached = self._day_info.get((symbol, today))
