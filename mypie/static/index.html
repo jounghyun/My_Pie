@@ -106,12 +106,17 @@
   .range-bar { position: relative; height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--down), var(--muted), var(--up)); opacity: .35; }
   .range-wrap { position: relative; }
   .range-pin { position: absolute; top: -4px; width: 14px; height: 14px; border-radius: 50%; background: var(--card); border: 3px solid var(--text); transform: translateX(-50%); }
-  .range-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .range-cap { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .range-labels { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 8px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .range-labels span:last-child { margin-left: auto; }  /* 좁아서 줄이 바뀌어도 고가는 오른쪽에 */
   .value { font-size: clamp(18px, 4vw, 23px); font-weight: 750; letter-spacing: -0.02em; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ring-wrap { display: flex; align-items: center; gap: 14px; margin-top: 6px; }
   .ring { width: 74px; height: 74px; flex: none; }
   .countdown { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
+  .ring-text { min-width: 0; }
+  .ring-text .sub { white-space: normal; }  /* 좁으면 카드 밖으로 넘치지 않고 두 줄로 */
+  @media (max-width: 480px) { .hero { grid-template-columns: 1fr; } }  /* 휴대폰: 카드를 한 줄에 하나씩 */
 
   .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
   @media (max-width: 760px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -331,7 +336,7 @@
                   stroke-dasharray="201" stroke-dashoffset="201" transform="rotate(-90 40 40)"/>
           <defs><linearGradient id="ringGrad" x1="0" x2="1"><stop offset="0" stop-color="var(--brand)"/><stop offset="1" stop-color="var(--brand2)"/></linearGradient></defs>
         </svg>
-        <div><div class="countdown num" id="countdown">--:--:--</div><div class="sub">남음 · 새 계획 세우는 시각</div></div>
+        <div class="ring-text"><div class="countdown num" id="countdown">--:--:--</div><div class="sub">남음 · 새 계획 세우는 시각</div></div>
       </div>
     </div>
     <div class="card">
@@ -339,8 +344,9 @@
       <div class="value num" id="selPrice">-</div>
       <div class="sub num" id="selSub">-</div>
       <div class="range" id="rangeBox" hidden>
+        <div class="range-cap">오늘 저가 ~ 고가</div>
         <div class="range-wrap"><div class="range-bar"></div><div class="range-pin" id="rangePin"></div></div>
-        <div class="range-labels num"><span id="rangeLow"></span><span>오늘 저가·고가</span><span id="rangeHigh"></span></div>
+        <div class="range-labels num"><span id="rangeLow"></span><span id="rangeHigh"></span></div>
       </div>
     </div>
   </div>
