@@ -28,7 +28,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from . import backtest, krx, telegram, toss
+from . import backtest, buyhold, krx, telegram, toss
 from .config import load_config
 from .db import Database
 from .stockbroker import LiveStockExecutor, PaperStockExecutor
@@ -590,13 +590,19 @@ class StockBot:
                   "next_open": ts(krx.next_open(now, self.holidays)), "keys": self.client is not None,
                   "ip_error": self.ip_error, "slots": [], "account": None, "broker": self.broker or None}
         if self.book is not None:
-            slots = []
+            slots, changed = [], False
             for slot in self.slots:
                 s = self.book.slot(slot.id)
                 q = self.quotes.get(slot.symbol) or {}
                 price = self.prices.get(slot.symbol) or s["avg_price"]
                 value = s["qty"] * price
                 equity = s["cash"] + value
+                if "hold" not in s:  # 바이앤홀드 비교가 생기기 전부터 있던 계좌: 첫 매매 가격부터 들고 있었다고 친다
+                    first = self.db.trades(self.executor.mode, slot.symbol)[:1]
+                    buyhold.start(s, first[0]["price"] if first else None)
+                    changed = True
+                changed |= bool(s.get("hold_cash")) and bool(self.prices.get(slot.symbol))
+                hold_value = buyhold.settle(s, self.prices.get(slot.symbol))
                 slots.append({
                     "id": slot.id, "symbol": slot.symbol, "name": slot.name, "price": price,
                     "change_rate": (price / q["prev_close"] - 1) * 100 if q.get("prev_close") else None,
@@ -608,9 +614,14 @@ class StockBot:
                     "cash": s["cash"], "qty": s["qty"], "avg_price": s["avg_price"], "cost": s["cost"],
                     "contrib": s["contrib"], "value": value, "equity": equity,
                     "return_pct": (equity / s["contrib"] - 1) * 100 if s["contrib"] > 0 else None,
+                    "hold_return_pct": (hold_value / s["contrib"] - 1) * 100
+                    if hold_value is not None and s["contrib"] > 0 else None,  # 바이앤홀드였다면
+                    "hold_pnl": hold_value - s["contrib"] if hold_value is not None else None,
                     "unrealized": value - s["cost"] if s["qty"] else None,
                     "unrealized_pct": (value / s["cost"] - 1) * 100 if s["qty"] and s["cost"] > 0 else None,
                 })
+            if changed:
+                self.book.save()
             equity = self.book.equity(self.prices)
             contributions = self.book.data["contributions"]
             status["slots"] = slots

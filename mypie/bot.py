@@ -25,7 +25,7 @@ import uuid
 from dataclasses import asdict
 from datetime import timedelta
 
-from . import backtest, network, reports, telegram, timeframes, upbit
+from . import backtest, buyhold, network, reports, sshwatch, telegram, timeframes, upbit
 from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, sync_full
 from .config import load_config
 from .db import Database
@@ -673,12 +673,19 @@ class Bot:
         equity = self.book.equity(self.prices)
         contributions = self.book.data["contributions"]
         slots = []
+        changed = False
         for s in self.slots:
             b = self.book.slot(s.id, s.market)
             price = self.prices.get(s.market, 0.0)
             value = b["coin"] * price
             slot_equity = b["krw"] + value
             holding = self._holding(s, price)
+            if "hold" not in b:  # 바이앤홀드 비교가 생기기 전부터 있던 줄: 첫 매매 가격부터 들고 있었다고 친다
+                first = self.db.trades(self.executor.mode, s.market)[:1]
+                buyhold.start(b, first[0]["price"] if first else None)
+                changed = True
+            changed |= bool(b.get("hold_cash")) and price > 0
+            hold_value = buyhold.settle(b, price)
             slots.append({
                 "id": s.id, "market": s.market, "coin": s.coin, "weight": s.weight, "price": price,
                 "tf": s.tf, "tf_label": timeframes.TIMEFRAMES[s.tf]["short"], "bar": s.plan_day,
@@ -690,10 +697,16 @@ class Bot:
                 "holding": holding,
                 "book": b, "value": value, "equity": slot_equity,
                 "return_pct": (slot_equity / b["contrib"] - 1) * 100 if b["contrib"] > 0 else None,
+                # 바이앤홀드였다면 (같은 돈이 같은 때 들어와서 그냥 들고 있었다면)
+                "hold_return_pct": (hold_value / b["contrib"] - 1) * 100
+                if hold_value is not None and b["contrib"] > 0 else None,
+                "hold_pnl": hold_value - b["contrib"] if hold_value is not None else None,
                 "unrealized": value - b["cost"] if holding else None,
                 "unrealized_pct": (value / b["cost"] - 1) * 100 if holding and b["cost"] > 0 else None,
                 "actual_weight": slot_equity / equity * 100 if equity > 0 else 0.0,
             })
+        if changed:
+            self.book.save()
         net = self._network()
         self.db.set_state("status", {
             "updated_at": ts(),
@@ -807,6 +820,9 @@ class Bot:
     def run(self) -> None:
         self.event("info", f"🥧 봇 시작 · {self._describe()}", notify=True)
         threading.Thread(target=self._listen_commands, name="telegram-commands", daemon=True).start()
+        # SSH 로그인 알림: 보안 알림이라 웹페이지의 '매매 알림 끄기'와 상관없이 보낸다
+        threading.Thread(target=sshwatch.SshWatch(self.notifier).run, args=(self.db.path, self.stop_event),
+                         name="ssh-watch", daemon=True).start()
         wait = self.interval
         while not self.stop_event.is_set():
             try:

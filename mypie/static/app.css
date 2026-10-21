@@ -288,3 +288,6 @@
                   text-decoration: none; background: var(--card); }
   .seg.switch a + a { border-left: 1px solid var(--line); }
   .seg.switch a[aria-current=page] { background: var(--accent); color: var(--accent-fg); font-weight: 700; }
+
+  /* 카드의 '(바이앤홀드 …)' 비교 줄 */
+  .hold-line { font-size: 12px; margin-top: 2px; opacity: .85; }

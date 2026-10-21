@@ -9,6 +9,7 @@
     contributions: 봇이 굴리는 돈 전체에 넣은 돈 합계 (입금 − 출금), 전체 수익률 계산용
 """
 
+from .buyhold import add_flow
 from .db import Database
 
 FLOW_THRESHOLD = 100  # 이보다 작은 장부·실제 잔고 차이는 반올림 오차로 본다 (원)
@@ -52,7 +53,7 @@ class VaultBook:
         if any(s["symbol"] == symbol for s in self.data["slots"].values()):
             raise VaultError("이미 그 종목 계좌가 있어요")
         s = self.data["slots"][sid] = {"symbol": symbol, "name": name, "strategy": strategy, "cash": 0.0, "qty": 0,
-                                       "cost": 0.0, "avg_price": 0.0, "contrib": 0.0}
+                                       "cost": 0.0, "avg_price": 0.0, "contrib": 0.0, "hold": 0.0, "hold_cash": 0.0}
         self.save()
         return s
 
@@ -81,7 +82,7 @@ class VaultBook:
         amount = min(amount, self.data["vault"]) if amount > 0 else -min(-amount, s["cash"])
         self.data["vault"] -= amount
         s["cash"] += amount
-        s["contrib"] += amount
+        add_flow(s, amount)
         self.save()
 
     def deposit(self, amount: float) -> None:
@@ -102,7 +103,7 @@ class VaultBook:
                  avg_price=(s["avg_price"] * s["qty"] + qty * price) / total if total else 0.0)
         if s["cash"] < 0:  # 체결가가 예상보다 조금 높아 넘친 건 금고에서 채운다
             self.data["vault"] += s["cash"]
-            s["contrib"] -= s["cash"]
+            add_flow(s, -s["cash"])
             s["cash"] = 0.0
         self.save()
         return {"side": "buy", "price": price, "volume": qty, "krw": spent, "fee": fee, "profit": None, "reason": reason}
@@ -145,7 +146,7 @@ class VaultBook:
                 if not actual:
                     s["avg_price"] = 0.0
             s["qty"] = actual
-            s["contrib"] += value
+            add_flow(s, value)
             self.data["contributions"] += value
             changes[s["symbol"]] = delta
 
@@ -160,7 +161,7 @@ class VaultBook:
             for s in self.data["slots"].values():
                 cut = min(s["cash"], short * s["cash"] / slot_cash) if slot_cash > 0 else 0.0
                 s["cash"] -= cut
-                s["contrib"] -= cut
+                add_flow(s, -cut)
             self.data["vault"] = 0.0
         self.data["synced"] = True
         self.save()

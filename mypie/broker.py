@@ -21,6 +21,7 @@
 import math
 import uuid
 
+from .buyhold import add_flow
 from .db import Database
 from .timeutil import ts
 from .upbit import OrderNotPlaced, OrderRejected, OrderUnknown, UpbitClient, UpbitError
@@ -53,7 +54,7 @@ class Book:
         s = self.data["slots"].get(slot_id)
         if s is None:
             s = self.data["slots"][slot_id] = {"market": market, "krw": 0.0, "coin": 0.0, "avg_price": 0.0,
-                                               "cost": 0.0, "contrib": 0.0}
+                                               "cost": 0.0, "contrib": 0.0, "hold": 0.0, "hold_cash": 0.0}
         return s
 
     def cash(self) -> float:
@@ -80,7 +81,7 @@ class Book:
         scale = min(1.0, cash / total_need) if total_need > 0 else 0.0
         for sid, s in slots.items():
             new_krw = need[sid] * scale
-            s["contrib"] += new_krw - s["krw"]
+            add_flow(s, new_krw - s["krw"])
             s["krw"] = new_krw
         self.data["reserve"] = cash - sum(s["krw"] for s in slots.values())
         self.data["needs_alloc"] = False
@@ -118,7 +119,7 @@ class Book:
         """그 줄의 원화를 대기 원화로 옮긴다 (비중 0% 줄이 코인을 팔았을 때)."""
         s = self.data["slots"][slot_id]
         self.data["reserve"] += s["krw"]
-        s["contrib"] -= s["krw"]
+        add_flow(s, -s["krw"])
         s["krw"] = 0.0
         self.save()
 
@@ -151,7 +152,8 @@ def sync_full(book: Book, accounts: list[dict], slot_markets: dict, weights: dic
             # 원래 있던 코인은 넘겨받은 순간의 시세로 장부에 올린다. 업비트 평균 매수가로 올리면
             # 봇이 오기 전에 오른 만큼까지 봇의 실현 손익으로 잡힌다
             price = (prices.get(market) or float(entry.get("avg_buy_price") or 0)) if coin else 0.0
-            s.update(krw=0.0, coin=coin, avg_price=price, cost=coin * price, contrib=coin * price)
+            s.update(krw=0.0, coin=coin, avg_price=price, cost=coin * price, contrib=coin * price,
+                     hold=coin, hold_cash=0.0)  # 바이앤홀드였다면 원래 있던 코인을 그대로 들고 있다
         data["contributions"] = krw + sum(s["coin"] * prices.get(s["market"], s["avg_price"]) for s in data["slots"].values())
         data.update(needs_sync=False, needs_alloc=True)
         book.save()
@@ -163,7 +165,7 @@ def sync_full(book: Book, accounts: list[dict], slot_markets: dict, weights: dic
         for sid, s in data["slots"].items():
             share = diff * weights.get(sid, 0) / 100
             s["krw"] += share
-            s["contrib"] += share
+            add_flow(s, share)
         data["reserve"] += diff * (100 - sum(weights.get(sid, 0) for sid in data["slots"])) / 100
         flows += diff
     elif diff <= -FLOW_THRESHOLD:  # 출금
@@ -174,7 +176,7 @@ def sync_full(book: Book, accounts: list[dict], slot_markets: dict, weights: dic
         for s in data["slots"].values():
             cut = rest * s["krw"] / slot_cash if slot_cash > 0 else 0.0
             s["krw"] -= cut
-            s["contrib"] -= cut
+            add_flow(s, -cut)
         flows += diff
     else:
         data["reserve"] += diff  # 반올림 오차는 대기 원화로
@@ -185,7 +187,7 @@ def sync_full(book: Book, accounts: list[dict], slot_markets: dict, weights: dic
         price = prices.get(market) or s["avg_price"]
         delta = (coin - s["coin"]) * price
         if abs(delta) >= FLOW_THRESHOLD:
-            s["contrib"] += delta
+            add_flow(s, delta)
             flows += delta
         # 원가는 봇 장부를 그대로 쓴다. 밖에서 들어온 코인은 지금 시세로 더하고, 나간 코인은 그만큼 덜어 낸다
         if coin <= 0:

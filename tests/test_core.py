@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from mypie import auth, backtest, indicators, keys, krx, pin, reports, telegram, timeframes, upbit, web
+from mypie import auth, backtest, indicators, keys, krx, pin, reports, sshwatch, telegram, timeframes, upbit, web
 from mypie.bot import Bot, validate_slots
 from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
@@ -561,6 +561,18 @@ class BotFlowTest(TempDbTest):
         self.assertEqual([s.id for s in bot.slots], ["a"])
         self.assertEqual(self.make_bot().settings["slots"][0]["weight"], 80.0)  # 재시작해도 유지
 
+    def test_status_shows_buy_and_hold_comparison(self):
+        self.portfolio(("a", "KRW-BTC", "rsi", 100))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.go(bot, self.D1)                                          # 100원일 때 줄에 돈이 들어옴
+        self.btc(self.D1, 110)
+        self.go(bot, self.D1)
+        x = self.db.get_state("status")["slots"][0]
+        self.assertAlmostEqual(x["hold_return_pct"], 10.0)            # 그냥 들고 있었다면 +10%
+        self.assertAlmostEqual(x["hold_pnl"], 100_000)
+        self.assertAlmostEqual(x["return_pct"], 0.0)                  # RSI는 아직 안 샀다
+
     def test_zero_weight_row_only_watches(self):
         self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100), ("b", "KRW-ETH", "buy_and_hold", 0))
         bot = self.make_bot()
@@ -1000,6 +1012,29 @@ class WebLoginTest(TempDbTest):
     def test_no_login_when_telegram_not_connected(self):
         with mock.patch("mypie.telegram.load", return_value=None):
             self.assertEqual(self.request("/api/status")[0], 200)
+
+
+class SshWatchTest(unittest.TestCase):
+    def test_alerts_outside_logins_and_batches_failures(self):
+        sent, now = [], [0.0]
+        watch = sshwatch.SshWatch(sent.append, clock=lambda: now[0])
+        day = "2026-10-22"
+        watch.handle("Accepted publickey for jounghyun from 192.168.100.195 port 4933 ssh2: ED25519 SHA256:x", day)
+        self.assertEqual(sent, [])                                       # 집 안 PC 로그인은 조용히
+        watch.handle("Accepted password for jounghyun from 45.67.89.10 port 5000 ssh2", day)
+        self.assertIn("45.67.89.10", sent[-1])                           # 집 밖 로그인은 바로
+        self.assertIn("비밀번호", sent[-1])
+        for _ in range(3):
+            watch.handle("Failed password for invalid user admin from 91.200.12.34 port 40000 ssh2", day)
+        watch.handle("Invalid user test from 91.200.12.34 port 40001", day)
+        self.assertEqual(len(sent), 2)                                   # 같은 IP 실패는 하루 한 번만 바로
+        watch.summarize()
+        self.assertEqual(len(sent), 2)                                   # 1시간이 안 됐으면 아직
+        now[0] = 3600
+        watch.summarize()
+        self.assertIn("3번 더", sent[-1])                                # 그 뒤 실패 3번을 모아서
+        watch.handle("Failed password for invalid user admin from 91.200.12.34 port 40002 ssh2", "2026-10-23")
+        self.assertEqual(len(sent), 4)                                   # 다음 날이면 다시 바로 알림
 
 
 if __name__ == "__main__":

@@ -268,6 +268,20 @@ class StockBotTest(TempDb):
         self.assertEqual(bot.book.vault, 500_000)                        # 판 돈은 금고가 아니라
         self.assertGreater(self.slot(bot)["cash"], 500_000)              # 종목 계좌 잔액에 남는다
 
+    def test_status_compares_with_buy_and_hold(self):
+        self.toss.set(self.SYMBOL, DAY1, 100_000)
+        bot = self.make_bot()
+        self.request(1, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="rsi", amount=350_000)
+        bot.step(at(DAY1, "08:30"))
+        bot.step(at(DAY1, "08:31"))                                      # 시세를 받으면 그 가격에 산 셈
+        self.toss.quotes_[self.SYMBOL]["price"] = 110_000
+        bot.last_quotes = 0
+        bot.step(at(DAY1, "08:32"))
+        x = self.db.get_state("status")["slots"][0]
+        self.assertAlmostEqual(x["hold_return_pct"], 10.0)
+        self.assertAlmostEqual(x["hold_pnl"], 35_000)
+        self.assertAlmostEqual(x["return_pct"], 0.0)                    # RSI는 아직 안 샀다
+
     def test_holiday_is_detected_when_no_trading_shows_up(self):
         self.toss.set(self.SYMBOL, DAY1, 100_000)
         self.toss.closed.add(DAY1)                                      # 임시 휴장일 (장 달력에서 닫힘)
