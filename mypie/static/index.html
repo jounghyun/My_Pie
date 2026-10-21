@@ -350,7 +350,7 @@
   <section class="card" id="chart">
     <h2><span class="ico">📈</span>가격 차트 <small id="chartSub">일봉 · ▲매수 ▼매도</small>
       <span class="right seg" id="daysSeg">
-        <button type="button" data-days="30">1달</button><button type="button" data-days="90" aria-pressed="true">3달</button><button type="button" data-days="180">6달</button><button type="button" data-days="365">1년</button>
+        <button type="button" data-i="0">1달</button><button type="button" data-i="1" aria-pressed="true">3달</button><button type="button" data-i="2">6달</button><button type="button" data-i="3">1년</button>
       </span>
     </h2>
     <div class="pills" id="chartPills"></div>
@@ -576,7 +576,7 @@ function tradingDay(tsStr) {  // 매매 시각 → 거래일 (09시 전이면 �
 }
 const sym = (m) => m.replace('KRW-', '');
 
-const S = { data: null, candles: null, stats: null, system: null, days: 90, offset: 0, sel: null,
+const S = { data: null, candles: null, stats: null, system: null, range: 1, offset: 0, sel: null,
             rows: [], editSig: '', dirty: false, mode: 'paper', userMsg: false, focusRow: null,
             requested: {}, seenTrades: null, seenEvents: null, guidesTf: null };
 
@@ -920,12 +920,22 @@ function renderCandles() {
     el('span', {}, el('i', { style: 'background:var(--down)' }), '하락 · ▼매도'),
     el('span', { text: `${keyLabel(S.sel)} · ${barLabel(rows[0].day, tf)} ~ ${barLabel(rows[n - 1].day, tf)}` }));
   $('chartSub').textContent = `${tf === '1d' ? '일봉' : TF(tf).label} · ▲매수 ▼매도`;
-  const unit = tf === '1d' ? ['1달', '3달', '6달', '1년'] : ['30봉', '90봉', '180봉', '365봉'];
-  [...$('daysSeg').children].forEach((b, i) => { b.textContent = unit[i]; });
+}
+// 차트 기간 버튼: 주기마다 보기 좋은 기간 (기간, 봉 개수). 봉 개수는 서버 한도(400) 안으로
+const CHART_RANGES = {
+  '1d':   [['1달', 30], ['3달', 90], ['6달', 180], ['1년', 365]],
+  '240m': [['1주', 42], ['2주', 84], ['1달', 180], ['2달', 360]],
+  '60m':  [['1일', 24], ['3일', 72], ['1주', 168], ['2주', 336]],
+  '15m':  [['6시간', 24], ['1일', 96], ['2일', 192], ['4일', 384]],
+};
+function chartRange(tf) {
+  const ranges = CHART_RANGES[tf] || CHART_RANGES['1d'];
+  [...$('daysSeg').children].forEach((b, i) => { b.textContent = ranges[i][0]; });
+  return ranges[S.range][1];
 }
 $('daysSeg').addEventListener('click', (ev) => {
   const b = ev.target.closest('button'); if (!b) return;
-  S.days = +b.dataset.days;
+  S.range = +b.dataset.i;
   for (const x of $('daysSeg').children) x.setAttribute('aria-pressed', x === b);
   refreshCandles();
 });
@@ -1396,7 +1406,7 @@ async function refreshStatus() { try { S.data = await getJSON('/api/status'); re
 async function refreshCandles() {
   if (!S.sel) return;
   const key = S.sel, [m, tf] = splitKey(key);
-  try { const c = await getJSON(`/api/candles?market=${encodeURIComponent(m)}&tf=${tf}&days=${S.days}`); if (key === S.sel) { S.candles = c; renderCandles(); } } catch (e) {}
+  try { const c = await getJSON(`/api/candles?market=${encodeURIComponent(m)}&tf=${tf}&bars=${chartRange(tf)}`); if (key === S.sel) { S.candles = c; renderCandles(); } } catch (e) {}
 }
 async function refreshStats() { try { S.stats = await getJSON('/api/stats'); renderStats(); if (S.data && S.data.status) renderSlots(S.data.status); } catch (e) {} }
 async function refreshSystem() { try { S.system = await getJSON('/api/system'); renderSystem(); } catch (e) {} }

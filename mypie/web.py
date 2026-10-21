@@ -3,7 +3,7 @@
 실행: python3 -m mypie.web   →   http://<파이 IP>:8000
 
   GET  /api/status   봇 상태, 순위, 기록 (5초마다)
-  GET  /api/candles  차트용 봉과 매매 지점 (?market=KRW-BTC&tf=60m&days=90)
+  GET  /api/candles  차트용 봉과 매매 지점 (?market=KRW-BTC&tf=60m&bars=72  최근 봉 개수)
   GET  /api/stats    성과 통계, 종목별 성적, 날짜별 손익
   GET  /api/system   라즈베리파이 상태 (온도, 메모리, 디스크, 전원)
   POST /api/control  포트폴리오(종목·전략·비중)·계좌·한도 변경 (PIN 필요)
@@ -522,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
         builders = {
             "/api/status": lambda: build_payload(self.db_path, self.max_budget),
             "/api/candles": lambda: build_candles(self.db_path, query.get("market", ["KRW-BTC"])[0],
-                                                  max(20, min(int(query.get("days", ["90"])[0]), 400)),
+                                                  max(20, min(int(query.get("bars", query.get("days", ["90"]))[0]), 400)),
                                                   query.get("tf", ["1d"])[0]),
             "/api/stats": lambda: build_stats(self.db_path),
             "/api/system": lambda: build_system(self.db_path),

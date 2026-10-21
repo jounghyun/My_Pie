@@ -140,8 +140,10 @@ def sync_full(book: Book, accounts: list[dict], slot_markets: dict, weights: dic
             s = data["slots"][sid]
             entry = acc.get(market.split("-")[-1], {})
             coin = float(entry.get("balance", 0))
-            avg = float(entry.get("avg_buy_price") or 0) if coin else 0.0
-            s.update(krw=0.0, coin=coin, avg_price=avg, cost=coin * avg, contrib=coin * prices.get(market, avg))
+            # 원래 있던 코인은 넘겨받은 순간의 시세로 장부에 올린다. 업비트 평균 매수가로 올리면
+            # 봇이 오기 전에 오른 만큼까지 봇의 실현 손익으로 잡힌다
+            price = (prices.get(market) or float(entry.get("avg_buy_price") or 0)) if coin else 0.0
+            s.update(krw=0.0, coin=coin, avg_price=price, cost=coin * price, contrib=coin * price)
         data["contributions"] = krw + sum(s["coin"] * prices.get(s["market"], s["avg_price"]) for s in data["slots"].values())
         data.update(needs_sync=False, needs_alloc=True)
         book.save()
@@ -171,14 +173,20 @@ def sync_full(book: Book, accounts: list[dict], slot_markets: dict, weights: dic
 
     for sid, market in slot_markets.items():
         s = data["slots"][sid]
-        entry = acc.get(market.split("-")[-1], {})
-        coin = float(entry.get("balance", 0))
-        avg = float(entry.get("avg_buy_price") or 0) if coin else 0.0
-        delta = (coin - s["coin"]) * prices.get(market, avg)
+        coin = float(acc.get(market.split("-")[-1], {}).get("balance", 0))
+        price = prices.get(market) or s["avg_price"]
+        delta = (coin - s["coin"]) * price
         if abs(delta) >= FLOW_THRESHOLD:
             s["contrib"] += delta
             flows += delta
-        s.update(coin=coin, avg_price=avg, cost=coin * avg)
+        # 원가는 봇 장부를 그대로 쓴다. 밖에서 들어온 코인은 지금 시세로 더하고, 나간 코인은 그만큼 덜어 낸다
+        if coin <= 0:
+            s.update(coin=0.0, cost=0.0, avg_price=0.0)
+        elif coin > s["coin"]:
+            added = coin - s["coin"]
+            s.update(cost=s["cost"] + added * price, avg_price=(s["avg_price"] * s["coin"] + added * price) / coin, coin=coin)
+        else:
+            s.update(cost=s["cost"] * coin / s["coin"], coin=coin)
     data["contributions"] += flows
     book.save()
     return flows

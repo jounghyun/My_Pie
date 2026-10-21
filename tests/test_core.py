@@ -334,6 +334,36 @@ class BookTest(TempDbTest):
         sync_full(book, client.accounts(), slots, weights, prices)
         self.assertAlmostEqual(book.cash(), 40_000)
 
+    def test_full_mode_profit_counts_only_after_takeover(self):
+        book = Book(self.db, "book:live", "all", 0)
+        slots, weights = {"a": "KRW-BTC"}, {"a": 100}
+        old = [{"currency": "KRW", "balance": "0", "avg_buy_price": "0"},
+               {"currency": "BTC", "balance": "100", "avg_buy_price": "40"}]   # 예전에 40원에 산 코인
+        sync_full(book, old, slots, weights, {"KRW-BTC": 100})
+        self.assertAlmostEqual(book.slot("a")["cost"], 10_000)          # 넘겨받을 때 시세(100원)가 원가
+        self.assertAlmostEqual(book.slot("a")["avg_price"], 100)
+
+        trade = book.apply_sell("a", *PaperExecutor(0.0005).sell("KRW-BTC", 100, 110, {}), "test")
+        self.assertAlmostEqual(trade["profit"], 11_000 * 0.9995 - 10_000)  # 봇이 굴린 동안 오른 만큼만
+
+    def test_full_mode_sync_keeps_bot_cost_and_values_outside_coins_at_market(self):
+        book = Book(self.db, "book:live", "all", 0)
+        slots, weights = {"a": "KRW-BTC"}, {"a": 100}
+        acc = lambda coin, avg: [{"currency": "KRW", "balance": "0", "avg_buy_price": "0"},
+                                 {"currency": "BTC", "balance": str(coin), "avg_buy_price": str(avg)}]
+        sync_full(book, acc(100, 40), slots, weights, {"KRW-BTC": 100})
+        sync_full(book, acc(100, 40), slots, weights, {"KRW-BTC": 120})  # 업비트 평균가로 덮어쓰지 않는다
+        self.assertAlmostEqual(book.slot("a")["cost"], 10_000)
+
+        self.assertAlmostEqual(sync_full(book, acc(150, 60), slots, weights, {"KRW-BTC": 120}), 6_000)  # 코인 입금
+        self.assertAlmostEqual(book.slot("a")["cost"], 16_000)          # 들어온 50개는 지금 시세 120원으로
+        self.assertAlmostEqual(book.slot("a")["avg_price"], 16_000 / 150)
+
+        sync_full(book, acc(75, 60), slots, weights, {"KRW-BTC": 120})   # 절반을 밖에서 뺌
+        self.assertAlmostEqual(book.slot("a")["cost"], 8_000)
+        sync_full(book, acc(0, 0), slots, weights, {"KRW-BTC": 120})
+        self.assertEqual((book.slot("a")["cost"], book.slot("a")["avg_price"]), (0.0, 0.0))
+
 
 class LiveExecutorTest(TempDbTest):
     def test_buy_keeps_pending_mark_until_cleared(self):
