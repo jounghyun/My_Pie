@@ -308,14 +308,17 @@ def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, s
             return 400, f"투자 한도는 {MIN_ORDER_KRW:,}원 ~ {max_budget:,.0f}원 사이로 정해 주세요."
         if load_keys() is None:
             return 400, "업비트 API 키가 아직 없어요. 파이에서 python3 -m mypie.keys 로 먼저 등록하세요."
-        if data.get("confirm_live") is not True:
-            return 400, "실거래는 '실제 돈으로 거래한다'에 체크해야 바꿀 수 있어요."
     if not Path(db_path).exists():
         return 503, "봇이 아직 시작되지 않았어요."
     request = {"slots": slots, "mode": mode, "budget": "all" if budget_all else budget, "requested_at": ts()}
     with _pin_lock:  # 한 번에 하나씩만 확인해서 무작위 대입을 느리게 만든다
         db = Database(db_path, create=False)
         try:
+            # '실제 돈' 체크는 실거래로 넘어갈 때와 계좌 전액으로 바꿀 때만 받는다 (이미 실거래 중인 종목·비중 변경은 X)
+            current = (db.get_state("status") or {}).get("settings") or {}
+            if (mode == "live" and data.get("confirm_live") is not True
+                    and (current.get("mode") != "live" or (budget_all and current.get("budget") != "all"))):
+                return 400, "실거래는 '실제 돈으로 거래한다'에 체크해야 바꿀 수 있어요."
             failure = _check_pin(db, str(data.get("pin", "")))
             if failure:
                 return failure

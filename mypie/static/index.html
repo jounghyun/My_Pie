@@ -1080,6 +1080,10 @@ async function requestRanking(market, tf = '1d', refresh = false) {  // refresh:
   try { await postJSON('/api/ranking', { market, tf }); } catch (e) {}
 }
 function touch() { S.dirty = true; updateFormView(); }
+function needsLiveConfirm() {  // 실거래로 넘어갈 때와 계좌 전액으로 바꿀 때만 '실제 돈' 체크를 받는다 (서버와 같은 규칙)
+  const s = S.data && S.data.status, cur = s ? s.settings : {};
+  return S.mode === 'live' && (cur.mode !== 'live' || ($('budgetAll').checked && cur.budget !== 'all'));
+}
 function updateFormView() {
   const d = S.data, s = d && d.status;
   const sum = S.rows.reduce((t, r) => t + (Number(r.weight) || 0), 0);
@@ -1104,7 +1108,7 @@ function updateFormView() {
   $('budgetHint').textContent = all
     ? '업비트 계좌의 원화와 포트폴리오 종목 코인 전체를 비중대로 굴려요. 원래 있던 코인은 그 종목 줄의 보유분이 되고, 입금하면 비중대로 나눠서 추가 매수해요.'
     : '이 금액을 비중대로 나눠서 시작해요. 번 돈은 각 줄에서 다음 매매에 다시 들어가요. 업비트에 원래 있던 다른 돈·코인은 건드리지 않아요.';
-  $('confirmRow').hidden = !(live && (!s || s.settings.mode !== 'live'));
+  $('confirmRow').hidden = !needsLiveConfirm();
   const ready = d && d.pin_set && s;
   $('pin').disabled = !ready;
   $('apply').disabled = !ready || sum > 100 || !S.rows.length;
@@ -1129,7 +1133,7 @@ $('apply').addEventListener('click', async () => {
                  slots: S.rows.map(r => ({ id: r.id || '', market: r.market, strategy: r.strategy, tf: r.tf || '1d', weight: Number(r.weight) })) };
   S.userMsg = true;
   if (!body.pin) { setMsg('PIN을 입력해 주세요.', 'bad'); $('pin').focus(); return; }
-  if (body.mode === 'live' && cur.mode !== 'live' && !body.confirm_live) { setMsg("실거래로 바꾸려면 '실제 돈으로 주문이 나간다'에 체크해 주세요.", 'bad'); return; }
+  if (needsLiveConfirm() && !body.confirm_live) { setMsg("실거래로 바꾸려면 '실제 돈으로 주문이 나간다'에 체크해 주세요.", 'bad'); return; }
   const accountChanged = body.mode !== cur.mode || (body.mode === 'live' && String(body.budget) !== String(cur.budget === 'all' ? 'all' : Math.round(cur.budget)));
   const lines = S.rows.map(r => `· ${marketLabel(r.market)} — ${TF(r.tf || "1d").short} · ${rankedList(rkey(r.market, r.tf)).find(x => x.name === r.strategy).label} ${r.weight}%`);
   lines.unshift(`계좌: ${body.mode === 'live' ? (all ? '실거래 (계좌 전액)' : `실거래 (한도 ${won(body.budget)})`) : '모의투자'}`);

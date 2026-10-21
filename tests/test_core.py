@@ -732,6 +732,13 @@ class WebTest(TempDbTest):
                                                  1_000_000)[0], 200)
             self.assertEqual(self.db.get_state("control_request")["budget"], "all")
 
+            # 이미 실거래 중이면 종목·비중만 바꿀 때는 다시 체크하지 않는다
+            self.db.set_state("status", {"settings": {"mode": "live", "budget": 100_000}})
+            self.assertEqual(web.request_control(self.path, {**live, "budget": 100_000}, 1_000_000)[0], 200)
+            self.assertEqual(web.request_control(self.path, {**live, "budget": "all"}, 1_000_000)[0], 400)  # 계좌 전액으로 넓힐 땐 체크
+            self.db.set_state("status", {"settings": {"mode": "live", "budget": "all"}})
+            self.assertEqual(web.request_control(self.path, {**live, "budget": "all"}, 1_000_000)[0], 200)
+
     def test_rejects_bad_portfolio(self):
         over = {**self.request, "pin": "2468", "slots": [{"market": "KRW-BTC", "strategy": "rsi", "weight": 90},
                                                          {"market": "KRW-ETH", "strategy": "rsi", "weight": 20}]}
