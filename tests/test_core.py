@@ -176,6 +176,12 @@ class IndicatorTest(unittest.TestCase):
         self.assertAlmostEqual(k, 100)
         self.assertAlmostEqual(d, 100)
 
+    def test_true_range_rma_and_linreg(self):
+        self.assertEqual(indicators.true_ranges([12, 15], [8, 11], [10, 14]), [4, 5])   # 둘째 봉: 직전 종가 10 → 고가 15
+        self.assertEqual(indicators.rma_series([2.0] * 5, 3), [2.0, 2.0, 2.0])
+        self.assertAlmostEqual(indicators.linreg([1, 3, 5, 7], 4), 7)                   # 직선이면 마지막 값 그대로
+        self.assertAlmostEqual(indicators.linreg([0, 2, 0, 2], 4), 1.6)
+
 
 class StrategyTest(unittest.TestCase):
     def test_every_strategy_has_explanations(self):
@@ -222,6 +228,29 @@ class StrategyTest(unittest.TestCase):
     def test_momentum(self):
         hist = [candle(f"d{i}", 0, 0, 0, float(100 + i)) for i in range(40)]
         self.assertTrue(create_strategy("momentum").plan(hist, 0).buy_at_open)
+
+    def test_supertrend_follows_trend(self):
+        up = [candle(f"d{i}", 100 + i, 101 + i, 99 + i, 100 + i) for i in range(40)]
+        self.assertTrue(create_strategy("supertrend").plan(up, 0).buy_at_open)
+        crash = up + [candle(f"c{i}", 70, 71, 69, 70) for i in range(3)]       # 아래 선을 뚫고 마감
+        self.assertTrue(create_strategy("supertrend").plan(crash, 0).sell_at_open)
+
+    def test_smart_money_follows_structure_breaks(self):
+        zigzag = [100 + 2 * i + 5 * math.sin(i * math.pi / 4) for i in range(60)]   # 고점·저점이 점점 높아짐
+        up = [candle(f"d{i}", p, p + 1, p - 1, p) for i, p in enumerate(zigzag)]
+        down = [candle(f"d{i}", 300 - p, 301 - p, 299 - p, 300 - p) for i, p in enumerate(zigzag)]
+        strategy = create_strategy("smart_money", {"swing": 2})
+        self.assertTrue(strategy.plan(up, 0).buy_at_open)
+        self.assertTrue(strategy.plan(down, 0).sell_at_open)
+
+    def test_squeeze_momentum_buys_breakout_and_sells_when_power_fades(self):
+        flat = [candle(f"f{i}", 100, 101, 99, 100) for i in range(40)]          # 좁게 뭉친 구간 (스퀴즈)
+        strategy = create_strategy("squeeze_momentum")
+        self.assertFalse(strategy.plan(flat, 0).buy_at_open)
+        burst = flat + [candle(f"b{i}", p, p + 1, p - 1, p) for i, p in enumerate((105, 112, 120))]
+        self.assertTrue(strategy.plan(burst, 0).buy_at_open)
+        fade = burst + [candle(f"x{i}", p, p + 1, p - 1, p) for i, p in enumerate((112, 104))]
+        self.assertTrue(strategy.plan(fade, 0).sell_at_open)
 
     def test_not_enough_data_does_nothing(self):
         for name in STRATEGIES:

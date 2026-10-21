@@ -2,12 +2,13 @@
 
 from .base import DayPlan, SignalStrategy, Strategy
 from .breakout import Turtle, VolatilityBreakout, VolatilityBreakoutMA
+from .popular import SmartMoney, SqueezeMomentum, SuperTrend
 from .signals import Bollinger, BuyAndHold, Macd, MaCross, Momentum, Rsi, Stochastic
 
 STRATEGIES: dict[str, type[Strategy]] = {
     cls.name: cls
     for cls in (VolatilityBreakout, VolatilityBreakoutMA, MaCross, Rsi, Bollinger,
-                Macd, Turtle, Momentum, Stochastic, BuyAndHold)
+                Macd, Turtle, Momentum, Stochastic, SqueezeMomentum, SmartMoney, SuperTrend, BuyAndHold)
 }
 
 

@@ -454,7 +454,7 @@
     <div class="chart-box" id="simBox"></div>
     <div class="legend" id="simLegend"></div>
     <div class="tools"><button type="button" id="simUse">➕ 이 조합을 포트폴리오 설정에 넣기</button></div>
-    <h3 class="subhead" id="rankPeriod">같은 기간 10개 전략 순위</h3>
+    <h3 class="subhead" id="rankPeriod">같은 기간 전략 순위</h3>
     <div class="scroll">
       <table>
         <thead><tr><th class="left">순위</th><th class="left">전략</th><th>수익률</th><th>연평균</th><th>최대 낙폭</th><th>승률</th><th>매매</th><th>추이</th></tr></thead>
@@ -1411,13 +1411,13 @@ function renderRankTable() {
   if (!simReady()) {
     empty.style.display = 'block';
     empty.textContent = r && r.message ? r.message : '계산하는 중이에요…';
-    $('rankPeriod').textContent = '같은 기간 10개 전략 순위';
+    $('rankPeriod').textContent = '같은 기간 전략 순위';
     return;
   }
   empty.style.display = 'none';
   const tf = r.tf, s = S.data.status, period = simPeriods(tf).find(p => p.days === r.days);
   const slot = s && s.slots.find(x => x.rank_key === rkey(r.market, tf)), using = slot ? slot.strategy.name : null;
-  $('rankPeriod').textContent = `같은 기간(최근 ${period ? period.label : r.days + '일'}) 10개 전략 순위 · ${r.rank_by === 'calmar' ? '위험 대비 수익 순' : '수익률 순'}`;
+  $('rankPeriod').textContent = `같은 기간(최근 ${period ? period.label : r.days + '일'}) ${r.results.length}개 전략 순위 · ${r.rank_by === 'calmar' ? '위험 대비 수익 순' : '수익률 순'}`;
   const guides = Object.fromEntries((S.data.strategies || []).map(g => [g.name, g]));
   for (const x of r.results) {
     const g = guides[x.name] || {};

@@ -118,7 +118,7 @@ _sim_cache: dict[tuple, list[dict]] = {}
 
 
 def build_simulation(db_path: str, cfg: dict, market: str, tf: str, days: int, strategy: str) -> dict:
-    """전략 시뮬레이션: 한 종목·판단 주기로 최근 days일 동안 10개 전략을 굴려 본 순위와, 고른 전략의 매매 지점.
+    """전략 시뮬레이션: 한 종목·판단 주기로 최근 days일 동안 모든 전략을 굴려 본 순위와, 고른 전략의 매매 지점.
     봇이 모아 둔 봉으로 계산한다. 봉이 모자라거나 오래됐으면 need_data / stale로 알려서 봇에게 받아 달라고 하게 한다."""
     out = {"market": market, "tf": tf, "days": days, "periods": [], "ready": False}
     if not MARKET_PATTERN.match(market) or tf not in timeframes.TIMEFRAMES:

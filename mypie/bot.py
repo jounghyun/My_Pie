@@ -749,7 +749,8 @@ class Bot:
             key = ranking_key(market, tf)
             if not (MARKET_PATTERN.match(market) and tf in timeframes.TIMEFRAMES):
                 continue
-            if (rankings.get(key) or {}).get("day") != day:
+            old = rankings.get(key) or {}
+            if old.get("day") != day or len(old.get("results") or []) != len(STRATEGIES):
                 self._rank_market(market, tf, day, rankings)
                 return
             try:  # 순위는 오늘 것이 있어도 봉은 새로 받아 둔다 (웹페이지 전략 시뮬레이션용)
@@ -758,7 +759,9 @@ class Bot:
                 log.warning("%s %s 봉을 받지 못했어요: %s", market, tf, e)
             return
         for s in self.slots:
-            if (rankings.get(s.rank_key) or {}).get("day") != day:
+            old = rankings.get(s.rank_key) or {}
+            # 오늘 것이 아니거나, 그 뒤로 전략이 추가·삭제됐으면 다시 계산
+            if old.get("day") != day or len(old.get("results") or []) != len(STRATEGIES):
                 self._rank_market(s.market, s.tf, day, rankings)
                 return
 

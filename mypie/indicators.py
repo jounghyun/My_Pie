@@ -73,3 +73,34 @@ def stochastic(highs: list[float], lows: list[float], closes: list[float],
         fast.append(100 * (closes[i] - ll) / (hh - ll) if hh > ll else 50.0)
     slow_k = [sum(fast[j:j + smooth]) / smooth for j in range(smooth)]
     return slow_k[-1], sum(slow_k) / smooth
+
+
+def true_ranges(highs: list[float], lows: list[float], closes: list[float]) -> list[float]:
+    """True Range 시계열: 그 봉의 고가−저가와, 직전 종가에서 고가·저가까지 거리 중 가장 큰 값 (첫 봉은 고가−저가)."""
+    out = [highs[0] - lows[0]] if closes else []
+    for i in range(1, len(closes)):
+        out.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+    return out
+
+
+def rma_series(values: list[float], n: int) -> list[float]:
+    """와일더 이동평균 시계열 (ATR에 쓰는 방식). 첫 값은 앞 n개의 단순 평균, [0]은 values[n-1] 자리."""
+    if n <= 0 or len(values) < n:
+        return []
+    r = sum(values[:n]) / n
+    out = [r]
+    for v in values[n:]:
+        r = (r * (n - 1) + v) / n
+        out.append(r)
+    return out
+
+
+def linreg(values: list[float], n: int) -> float | None:
+    """최근 n개 값에 직선을 맞췄을 때 마지막 지점의 값 (TradingView의 linreg(src, n, 0)과 같음)."""
+    if n <= 1 or len(values) < n:
+        return None
+    ys = values[-n:]
+    x_mean, y_mean = (n - 1) / 2, sum(ys) / n
+    sxx = sum((x - x_mean) ** 2 for x in range(n))
+    slope = sum((x - x_mean) * (y - y_mean) for x, y in enumerate(ys)) / sxx
+    return y_mean + slope * (n - 1 - x_mean)
