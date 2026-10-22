@@ -51,6 +51,24 @@ def save_keys(access: str, secret: str, path: Path = ENV_PATH) -> None:
     write_env({ACCESS: access, SECRET: secret}, path)
 
 
+RENEW_STEPS = ("갱신 방법\n"
+               "1) PC에서 업비트 웹 → 마이페이지 → Open API 관리 → 새 키 발급\n"
+               "   (자산조회·주문조회·주문하기만 체크, 출금은 체크하지 마세요. 허용 IP에 집 IP)\n"
+               "2) 파이에서: cd ~/My_Pie && python3 -m mypie.keys  (Access·Secret 붙여넣기)\n"
+               "3) 확인: python3 -m mypie.keys --check")
+
+
+def expired_text(expire_at: str | None = None) -> str:
+    when = f" (만료일 {expire_at[:10]})" if expire_at else ""
+    return (f"🔑 업비트 API 키가 만료됐거나 더 쓸 수 없어요{when}. 실거래 주문과 잔고 확인이 멈춰 있어요.\n\n"
+            + RENEW_STEPS)
+
+
+def expiring_text(expire_at: str, left: int) -> str:
+    return (f"🔑 업비트 API 키가 {expire_at[:10]}에 만료돼요 (앞으로 {left}일). 키는 연장이 안 돼서, "
+            "만료되면 실거래가 멈춰요. 미리 새 키로 바꿔 두세요.\n\n" + RENEW_STEPS)
+
+
 def days_left(expire_at: str) -> int:
     """만료까지 남은 날 수."""
     expires = datetime.fromisoformat(expire_at)

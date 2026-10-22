@@ -18,6 +18,18 @@ def public_ip(timeout: float = 5) -> str | None:
     return None
 
 
+KEY_ERRORS = ("expired_access_key", "invalid_access_key")  # 키가 만료됐거나 지워져서 더 못 쓴다
+
+
+def is_key_error(error: BaseException | None) -> bool:
+    """업비트가 'API 키가 만료됐다/없는 키다'라고 거절한 오류인지 (원인 오류까지 따라가며 확인)."""
+    while error is not None:
+        if (getattr(error, "name", "") or "") in KEY_ERRORS:
+            return True
+        error = error.__cause__
+    return False
+
+
 def is_ip_error(error: BaseException | None) -> bool:
     """업비트가 '허용되지 않은 IP'라고 거절한 오류인지 (원인 오류까지 따라가며 확인)."""
     while error is not None:

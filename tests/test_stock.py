@@ -261,6 +261,24 @@ class StockBotTest(TempDb):
         bot.step(at(DAY2, "09:05"))
         self.assertNotIn("buy", self.slot(bot))
 
+    def test_key_expiry_is_alerted_with_renewal_steps(self):
+        bot = self.make_bot()
+        sent = []
+        bot.notifier = sent.append
+        bad = toss.TossError("토스증권 인증 실패 (invalid_client)", 401, "invalid_client")
+        self.assertTrue(toss.is_key_error(bad))
+        self.assertFalse(toss.is_key_error(toss.TossError("잔고 부족", 400, "insufficient")))
+
+        def fail():
+            raise bad
+        for _ in range(2):                                               # 같은 날 두 번째는 조용히
+            with self.assertRaises(toss.TossError):
+                bot._call(fail)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("python3 -m mypie.toss", sent[0])                  # 갱신 방법까지
+        bot._call(lambda: None)                                          # 새 키로 다시 통함
+        self.assertIn("다시 연결", sent[-1])
+
     def test_stop_loss_sells_intraday_and_waits_for_a_fresh_signal(self):
         self.toss.set(self.SYMBOL, DAY1, 100_000)
         bot = self.make_bot()

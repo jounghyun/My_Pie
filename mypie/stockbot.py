@@ -248,15 +248,31 @@ class StockBot:
         self.last_quotes = time.monotonic()
 
     def _call(self, fn, *args, **kwargs):
-        """토스증권 호출. 허용 IP 오류면 표시해 두고 그대로 올려 보낸다."""
+        """토스증권 호출. 허용 IP 오류면 표시해 두고, 키 만료면 알린 뒤 그대로 올려 보낸다."""
         try:
             result = fn(*args, **kwargs)
         except toss.TossError as e:
             if toss.is_ip_error(e):
                 self.ip_error = True
+            if toss.is_key_error(e):
+                self._key_alert()
             raise
         self.ip_error = False
+        if (self.db.get_state("key_alert") or {}).get("expired"):  # 만료 알림 뒤 새 키로 다시 통했다
+            self.db.delete_state("key_alert")
+            self.event("info", "토스증권 API 키가 다시 연결됐어요", notify=True)
         return result
+
+    def _key_alert(self) -> None:
+        """API 키 만료 알림: 갱신 방법까지 텔레그램으로, 하루 한 번 (매매 알림을 꺼도 보낸다). 화면 기록에는 첫 줄만."""
+        day = now_kst().date().isoformat()
+        if (self.db.get_state("key_alert") or {}).get("day") == day:
+            return
+        self.db.set_state("key_alert", {"day": day, "at": ts(), "expired": True})
+        text = toss.expired_text()
+        log.warning(text.splitlines()[0])
+        self.db.add_event("error", text.splitlines()[0])
+        self.notifier("📈 " + text)
 
     def _market_open_today(self, now: datetime, today: str) -> bool:
         """달력상 거래일이어도 임시 휴장일일 수 있어서 토스증권 장 달력으로 하루 한 번 확인한다."""

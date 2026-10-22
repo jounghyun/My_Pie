@@ -30,7 +30,7 @@ from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, sync_full
 from .config import load_config
 from .db import Database
 from .history import sync_candles
-from .keys import days_left, load_keys
+from .keys import days_left, expired_text, expiring_text, load_keys
 from .strategies import STRATEGIES, DayPlan, create_strategy, strategy_params
 from .strategies.combo import check_rule, make_rule, normalize_rule, rule_fields
 from .timeframes import bar_key, next_bar
@@ -45,6 +45,7 @@ IP_CHECK_SEC = 600          # 집 공인 IP 확인 간격
 MAX_BACKOFF_SEC = 300       # 오류가 계속될 때 최대 대기 시간
 TOPUP_MIN_KRW = 10_000      # 보유 중인 줄에 이만큼 이상 원화 몫이 생기면(입금·비중 변경) 추가 매수
 MAX_SLOTS = 10
+KEY_WARN_DAYS = (30, 14, 7, 3, 1)  # 업비트 키 만료 며칠 전에 텔레그램으로 알릴지
 MARKET_PATTERN = re.compile(r"^KRW-[A-Z0-9]{1,15}$")
 
 
@@ -631,6 +632,10 @@ class Bot:
             if net.get("ip_error"):
                 self.event("info", "업비트 허용 IP 문제가 해결됐어요", notify=True)
             self.db.set_state("network", {**net, "upbit_ok_ip": net["ip"], "ip_error": False})
+        if (self.db.get_state("key_alert") or {}).get("expired"):  # 만료 알림 뒤 새 키로 다시 통했다
+            self.db.delete_state("key_alert")
+            self.key_day = None  # 새 키의 만료일을 바로 다시 확인
+            self.event("info", "업비트 API 키가 다시 연결됐어요", notify=True)
 
     def _mark_ip_error(self) -> None:
         net = self._network()
@@ -776,13 +781,34 @@ class Bot:
         except upbit.UpbitError as e:
             if network.is_ip_error(e):
                 self._mark_ip_error()
+            self._check_key_error(e)
             log.warning("업비트 키 만료일을 확인하지 못했어요: %s", e)
             return
         self._mark_upbit_ok()
         self.db.set_state("key_info", {"expire_at": expire_at, "checked": day})
-        if expire_at and days_left(expire_at) <= 30:
-            self.event("warning", f"업비트 API 키가 {expire_at[:10]}에 만료돼요 (앞으로 {days_left(expire_at)}일). "
-                                  "만료되면 실거래가 멈추니 새 키를 받아 python3 -m mypie.keys 로 등록하세요", notify=True)
+        left = days_left(expire_at) if expire_at else None
+        if left is not None and left < 0:
+            self._key_alert(expired_text(expire_at), expired=True)
+        elif left is not None and left <= 30:
+            self.event("warning", f"업비트 API 키가 {expire_at[:10]}에 만료돼요 (앞으로 {left}일). "
+                                  "새 키를 받아 python3 -m mypie.keys 로 등록하세요")
+            if left in KEY_WARN_DAYS:  # 텔레그램은 30·14·7·3·1일 전에만 (매일 오면 귀찮으니)
+                self._key_alert(expiring_text(expire_at, left))
+
+    def _check_key_error(self, error: BaseException) -> None:
+        if network.is_key_error(error):
+            self._key_alert(expired_text((self.db.get_state("key_info") or {}).get("expire_at")), expired=True)
+
+    def _key_alert(self, text: str, expired: bool = False) -> None:
+        """API 키 만료 알림: 갱신 방법까지 텔레그램으로, 하루 한 번 (매매 알림을 꺼도 보낸다). 화면 기록에는 첫 줄만."""
+        day = trading_day()
+        if (self.db.get_state("key_alert") or {}).get("day") == day:
+            return
+        self.db.set_state("key_alert", {"day": day, "at": ts(), "expired": expired})
+        first = text.splitlines()[0]
+        log.warning(first)
+        self.db.add_event("error" if expired else "warning", first)
+        self.notifier("🥧 " + text)
 
     def _update_rankings(self, day: str) -> None:
         """종목 × 판단 주기별 전략 순위. 포트폴리오 줄은 하루 한 번, 웹페이지에서 요청한 건 바로 (한 루프에 하나씩).
@@ -865,6 +891,7 @@ class Bot:
             except Exception as e:  # 어떤 오류가 나도 봇은 멈추지 않고 재시도한다
                 if network.is_ip_error(e):
                     self._mark_ip_error()
+                self._check_key_error(e)
                 message = f"업비트 오류: {e}" if isinstance(e, upbit.UpbitError) else f"오류: {e!r}"
                 if message != self.last_error:
                     if isinstance(e, upbit.UpbitError):

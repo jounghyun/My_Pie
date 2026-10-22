@@ -20,7 +20,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from mypie import auth, backtest, indicators, keys, krx, pin, reports, sshwatch, stoploss, telegram, timeframes, upbit, web
+from mypie import (auth, backtest, indicators, keys, krx, network, pin, reports, sshwatch, stoploss, telegram, timeframes,
+                   upbit, web)
 from mypie.bot import Bot, validate_slots
 from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
@@ -673,6 +674,35 @@ class BotFlowTest(TempDbTest):
         self.assertEqual(bot.slots[0].strategy.name, "rsi")
         self.assertNotIn("buy", self.make_bot().settings["slots"][0])
         self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "sell": ["nope"], "weight": 10}])[1])
+
+    def test_key_expiry_alerts_once_a_day_with_renewal_steps(self):
+        self.portfolio(("a", "KRW-BTC", "rsi", 100))
+        bot = self.make_bot()
+        sent = []
+        bot.notifier = sent.append
+        expired = upbit.UpbitError("API 키가 만료되었습니다.", 401, "expired_access_key")
+        self.assertTrue(network.is_key_error(expired))
+        self.assertFalse(network.is_key_error(upbit.UpbitError("잔고 부족", 400, "insufficient_funds")))
+        bot._check_key_error(expired)
+        bot._check_key_error(expired)                                  # 같은 날 두 번째는 조용히
+        self.assertEqual(len(sent), 1)
+        self.assertIn("만료", sent[0])
+        self.assertIn("python3 -m mypie.keys", sent[0])                 # 갱신 방법까지
+        self.assertIn("Open API 관리", sent[0])
+        with mock.patch("mypie.network.public_ip", return_value="1.1.1.1"):
+            bot._mark_upbit_ok()                                       # 새 키로 다시 통함
+        self.assertIn("다시 연결", sent[-1])
+        soon = (datetime.now(KST) + timedelta(days=7, hours=1)).isoformat()
+        with mock.patch("mypie.bot.load_keys", return_value=("a", "b")), \
+             mock.patch("mypie.upbit.UpbitClient.key_expiry", return_value=soon):
+            bot._update_key_info(self.D2)                              # 만료 7일 전
+        self.assertIn("앞으로 7일", sent[-1])
+        gone = (datetime.now(KST) - timedelta(days=1)).isoformat()
+        self.db.delete_state("key_alert")
+        with mock.patch("mypie.bot.load_keys", return_value=("a", "b")), \
+             mock.patch("mypie.upbit.UpbitClient.key_expiry", return_value=gone):
+            bot._update_key_info(self.D2)                              # 이미 지났으면 '만료됐어요'
+        self.assertIn("만료됐거나", sent[-1])
 
     def test_stop_loss_sells_and_waits_for_a_fresh_signal(self):
         self.db.set_state("settings", {"mode": "paper", "budget": 100_000, "slots": [

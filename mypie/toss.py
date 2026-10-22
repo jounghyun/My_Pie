@@ -58,6 +58,27 @@ class OrderUnknown(TossError):
     """주문이 들어갔는지 모른다. 다음 루프에서 recover()가 확인한다."""
 
 
+KEY_ERRORS = ("invalid_client", "login-user-not-found")  # Client ID·Secret이 만료·취소됐거나 틀림
+RENEW_STEPS = ("갱신 방법\n"
+               "1) PC에서 토스증권 웹(WTS) → 설정 → Open API → Client ID·Secret 새로 발급 (허용 IP에 집 IP)\n"
+               "2) 파이에서: cd ~/My_Pie && python3 -m mypie.toss  (두 값 붙여넣기)\n"
+               "3) 확인: python3 -m mypie.toss --check")
+
+
+def is_key_error(error: BaseException | None) -> bool:
+    """토스증권이 '키를 쓸 수 없다'고 거절한 오류인지 (원인 오류까지 따라가며 확인)."""
+    while error is not None:
+        if isinstance(error, TossError) and error.status == 401 and error.code in KEY_ERRORS:
+            return True
+        error = error.__cause__
+    return False
+
+
+def expired_text() -> str:
+    return ("🔑 토스증권 API 키(Client ID·Secret)가 만료됐거나 더 쓸 수 없어요. 주식 주문과 시세 확인이 멈춰 있어요.\n\n"
+            + RENEW_STEPS)
+
+
 def is_ip_error(error: BaseException | None) -> bool:
     """허용 IP에 없는 곳에서 불러서 거절당한 오류인지 (원인 오류까지 따라가며 확인)."""
     while error is not None:
