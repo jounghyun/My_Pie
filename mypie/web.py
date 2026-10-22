@@ -304,7 +304,7 @@ def _simulate(db_path: str, market: str, tf: str, days: int, strategy: str, *, p
 
 # ---- 주식 (토스증권, 주식 봇 DB) ----
 
-STOCK_ACTIONS = ("add", "remove", "strategy", "transfer", "mode", "paper_cash")
+STOCK_ACTIONS = ("add", "remove", "close", "cancel_close", "strategy", "transfer", "mode", "paper_cash")
 
 
 def _slim_rankings(rankings: dict) -> dict:
@@ -529,7 +529,7 @@ def request_stock(stock_db: str, main_db: str, data: dict) -> tuple[int, dict]:
                 return 400, {"ok": False, "message": problem}
             request.update(symbol=symbol, name=str(data.get("name") or symbol)[:40], **rule_fields(rule),
                            stop_loss=stop, amount=max(0.0, float(data.get("amount") or 0)))
-        elif action in ("remove", "strategy", "transfer"):
+        elif action in ("remove", "close", "cancel_close", "strategy", "transfer"):
             request["slot"] = str(data.get("slot", ""))[:20]
             if action == "strategy":
                 rule, problem = check_rule(data, STOCK_STRATEGIES)

@@ -286,6 +286,33 @@ class StockBotTest(TempDb):
         bot.step(at(DAY2, "09:05"))
         self.assertNotIn("buy", self.slot(bot))
 
+    def test_close_sells_first_then_removes_the_account(self):
+        self.toss.set(self.SYMBOL, DAY1, 100_000)
+        bot = self.make_bot()
+        self.request(1, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="buy_and_hold", amount=350_000)
+        self.request(2, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="rsi", amount=0)
+        bot.step(at(DAY1, "08:30"))
+        empty = next(k for k, v in bot.book.data["slots"].items() if v["name"] == "SK하이닉스 2")
+        self.request(3, action="close", slot=empty)                      # 주식이 없으면 바로 지운다
+        bot.step(at(DAY1, "08:31"))
+        self.assertEqual(len(bot.book.data["slots"]), 1)
+        bot.step(at(DAY1, "09:01"))                                      # 3주 매수
+        sid = next(iter(bot.book.data["slots"]))
+        self.request(4, action="close", slot=sid)
+        bot.step(at(DAY1, "15:40"))                                      # 장 마감 뒤: 표시만 해 두고
+        self.assertTrue(self.slot(bot)["closing"])
+        self.assertIn("다음 장 시작(09:00)에 팔고 지워요", self.db.get_state("status")["slots"][0]["state_text"])
+        self.request(5, action="cancel_close", slot=sid)                 # 취소하면 다시 전략대로
+        bot.step(at(DAY1, "15:41"))
+        self.assertNotIn("closing", self.slot(bot))
+        self.request(6, action="close", slot=sid)
+        bot.step(at(DAY1, "15:42"))
+        self.toss.set(self.SYMBOL, DAY2, 101_000)
+        bot.step(at(DAY2, "09:01"))                                      # 다음 장 시작에 다 팔고 지운다
+        self.assertEqual([t[0] for t in self.trades()], ["buy", "sell"])
+        self.assertEqual(bot.book.data["slots"], {})
+        self.assertGreater(bot.book.vault, 1_000_000)                    # 판 돈과 잔액은 금고로
+
     def test_same_stock_can_have_several_accounts(self):
         self.toss.set(self.SYMBOL, DAY1, 100_000)
         bot = self.make_bot()

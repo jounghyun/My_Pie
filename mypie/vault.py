@@ -109,6 +109,15 @@ class VaultBook:
         self.save()
         return s["cash"]
 
+    def set_closing(self, sid: str, on: bool) -> None:
+        """'팔고 지우기': 켜 두면 봇이 장중에 이 계좌 주식을 다 팔고 지운다 (그동안은 새로 사지 않는다)."""
+        s = self.slot(sid)
+        if on:
+            s["closing"] = True
+        else:
+            s.pop("closing", None)
+        self.save()
+
     def transfer(self, sid: str, amount: float) -> None:
         """amount > 0: 금고 → 종목 계좌, amount < 0: 종목 계좌 → 금고."""
         s = self.slot(sid)
