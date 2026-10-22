@@ -1,14 +1,15 @@
-"""자동매매 봇 본체 (포트폴리오).
+"""코인 자동매매 봇 본체 (금고 + 코인 계좌).
 
 실행: python3 -m mypie.bot          (계속 실행)
       python3 -m mypie.bot --once   (한 번만 돌고 상태 출력, 점검용)
 
-포트폴리오는 여러 줄(slot)로 되어 있고, 줄마다 종목 + 전략 + 비중(%)이 있다.
-줄마다 따로 판단하고 따로 사고판다 (돈도 줄마다 따로, broker.Book 참고).
+돈은 금고와 코인 계좌 여러 개로 나눠 쓴다 (broker.Book 참고, 주식 봇과 같은 생각).
+코인 계좌마다 코인 하나 + 전략(살 때·팔 때) + 판단 주기 + 손절선이 있고, 자기 원화로만 따로 판단하고 사고판다.
+웹페이지 요청(계좌 만들기·이체·전략 바꾸기·팔고 지우기·계좌 전환)은 하나씩 처리한다.
 
-줄마다 판단 주기(일봉·4시간봉·1시간봉·15분봉)가 있다. 그 주기의 새 봉이 시작될 때(일봉은 매일 09:00 KST)
-계획을 세우고, 매도 신호가 난 줄을 먼저 판 다음 매수 신호가 난 줄을 산다 ('보유 유지'는 그대로).
-그 뒤 10초마다 현재가를 보면서 돌파 매수·이탈 매도를 한다.
+계좌마다 판단 주기(일봉·4시간봉·1시간봉·15분봉)가 있다. 그 주기의 새 봉이 시작될 때(일봉은 매일 09:00 KST)
+계획을 세우고, 매도 신호가 난 계좌를 먼저 판 다음 매수 신호가 난 계좌를 산다 ('보유 유지'는 그대로).
+그 뒤 10초마다 현재가를 보면서 돌파 매수·이탈 매도·손절을 한다.
 
 전원이 나갔다 들어오거나 재시작돼도 멈추지 않는다. 끊기기 전에 낸 주문이 있으면 업비트에 물어서
 장부를 먼저 맞추고(recover), 곧바로 같은 설정으로 이어서 매매한다.
@@ -21,20 +22,20 @@ import re
 import signal
 import threading
 import time
-import uuid
 from dataclasses import asdict
 from datetime import timedelta
 
 from . import backtest, buyhold, network, reports, sshwatch, stoploss, telegram, timeframes, upbit
-from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, sync_full
+from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, migrate_book, new_slot_id
 from .config import load_config
 from .db import Database
 from .history import sync_candles
 from .keys import days_left, expired_text, expiring_text, load_keys
 from .strategies import STRATEGIES, DayPlan, create_strategy, strategy_params
-from .strategies.combo import check_rule, make_rule, normalize_rule, rule_fields
+from .strategies.combo import check_rule, make_rule, normalize_rule, rule_label
 from .timeframes import bar_key, next_bar
 from .timeutil import KST, now_kst, trading_day, ts
+from .vault import VaultError
 
 log = logging.getLogger("mypie.bot")
 
@@ -43,24 +44,26 @@ EXCHANGE_REFRESH_SEC = 60   # 실거래일 때 업비트 실제 잔고 확인 �
 MARKET_INFO_SEC = 60        # 화면용 시세 요약·급등락 갱신 간격
 IP_CHECK_SEC = 600          # 집 공인 IP 확인 간격
 MAX_BACKOFF_SEC = 300       # 오류가 계속될 때 최대 대기 시간
-TOPUP_MIN_KRW = 10_000      # 보유 중인 줄에 이만큼 이상 원화 몫이 생기면(입금·비중 변경) 추가 매수
-MAX_SLOTS = 10
+MAX_SLOTS = 20
+REQUEST_PREFIX = "request:"  # 웹페이지가 남기는 요청 (request:<시각>-<번호>)
+MAX_RESULTS = 20
 KEY_WARN_DAYS = (30, 14, 7, 3, 1)  # 업비트 키 만료 며칠 전에 텔레그램으로 알릴지
 MARKET_PATTERN = re.compile(r"^KRW-[A-Z0-9]{1,15}$")
 
 
 class Slot:
-    """포트폴리오의 한 줄: 종목 + 전략 + 판단 주기 + 비중."""
+    """코인 계좌 하나의 전략과 이번 봉 계획 (돈과 코인은 장부 Book에 있다)."""
 
-    def __init__(self, cfg: dict, conf: dict):
-        self.id = conf["id"]
-        self.market = conf["market"]
-        self.tf = conf.get("tf") or timeframes.DEFAULT
-        self.weight = float(conf["weight"])
-        self.rule = normalize_rule(conf)  # 살 때·팔 때 전략 (예전 설정은 둘 다 같은 전략 하나)
+    def __init__(self, cfg: dict, sid: str, entry: dict):
+        self.id = sid
+        self.market = entry["market"]
+        self.name = entry.get("name") or self.market
+        self.tf = entry.get("tf") or timeframes.DEFAULT
+        self.rule = normalize_rule(entry)  # 살 때·팔 때 전략
         bar = timeframes.TIMEFRAMES[self.tf]["bar"]
         self.strategy = make_rule(self.rule, lambda n: create_strategy(n, {**strategy_params(cfg, n), "_bar": bar}))
-        self.stop_loss = float(conf.get("stop_loss") or 0)  # 손절선 % (0이면 안 씀)
+        self.stop_loss = float(entry.get("stop_loss") or 0)  # 손절선 % (0이면 안 씀)
+        self.closing = bool(entry.get("closing"))  # 팔고 지우는 중
         self.plan: DayPlan | None = None
         self.plan_day: str | None = None  # 계획을 세운 봉의 키 (일봉이면 날짜)
 
@@ -72,55 +75,24 @@ class Slot:
     def rank_key(self) -> str:
         return ranking_key(self.market, self.tf)
 
-    def conf(self) -> dict:
-        return {"id": self.id, "market": self.market, **rule_fields(self.rule), "tf": self.tf,
-                "weight": self.weight, **({"stop_loss": self.stop_loss} if self.stop_loss else {})}
-
 
 def ranking_key(market: str, tf: str) -> str:
     """전략 순위는 종목 × 판단 주기마다 따로다."""
     return f"{market}|{tf}"
 
 
-def new_slot_id() -> str:
-    return "s" + uuid.uuid4().hex[:6]
-
-
-def validate_slots(raw) -> tuple[list[dict] | None, str | None]:
-    """웹페이지에서 온 포트폴리오를 검사한다. (정리된 줄 목록, 문제) 중 하나."""
-    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_SLOTS:
-        return None, f"종목은 1~{MAX_SLOTS}개까지 넣을 수 있어요"
-    slots, seen = [], set()
-    for item in raw:
-        if not isinstance(item, dict):
-            return None, "잘못된 줄이 있어요"
-        market = str(item.get("market", ""))
-        tf = str(item.get("tf") or timeframes.DEFAULT)
-        try:
-            weight = float(item.get("weight"))
-        except (TypeError, ValueError):
-            return None, f"{market}의 비중을 숫자로 넣어 주세요"
-        if not MARKET_PATTERN.match(market):
-            return None, f"잘못된 종목: {market}"
-        if market in seen:
-            return None, f"{market}이(가) 두 번 들어 있어요. 종목마다 한 줄씩만 넣어 주세요"
-        rule, problem = check_rule(item, STRATEGIES)  # 살 때·팔 때 전략
-        if problem:
-            return None, f"{market}: {problem}"
-        if tf not in timeframes.TIMEFRAMES:
-            return None, f"알 수 없는 판단 주기: {tf}"
-        if not 0 <= weight <= 100:  # 0%는 '지켜보기만 하는 줄' (나중에 비중만 올리면 바로 매매)
-            return None, f"{market}의 비중은 0~100% 사이로 넣어 주세요"
-        stop, problem = stoploss.parse(item.get("stop_loss"))
-        if problem:
-            return None, f"{market}: {problem}"
-        seen.add(market)
-        slots.append({"id": str(item.get("id") or ""), "market": market, **rule_fields(rule), "tf": tf,
-                      "weight": weight, **({"stop_loss": stop} if stop else {})})
-    total = sum(s["weight"] for s in slots)
-    if total > 100.0001:
-        return None, f"비중 합계가 {total:g}%예요. 100% 이하로 맞춰 주세요"
-    return slots, None
+def check_account(r: dict) -> tuple[dict, str, float]:
+    """웹페이지에서 온 계좌 설정(살 때·팔 때 전략, 판단 주기, 손절선)을 검사한다. 잘못이면 VaultError."""
+    rule, problem = check_rule(r, STRATEGIES)
+    if problem:
+        raise VaultError(problem)
+    tf = str(r.get("tf") or timeframes.DEFAULT)
+    if tf not in timeframes.TIMEFRAMES:
+        raise VaultError(f"알 수 없는 판단 주기: {tf}")
+    stop, problem = stoploss.parse(r.get("stop_loss"))
+    if problem:
+        raise VaultError(problem)
+    return rule, tf, stop
 
 
 class Bot:
@@ -131,21 +103,20 @@ class Bot:
         self.notifier = telegram.Notifier()  # 텔레그램 알림 (연결돼 있고 알림을 켰을 때만 보낸다)
         self.interval = float(cfg["general"]["interval_sec"])
         self.fee_rate = float(cfg["paper"]["fee_rate"])
-        self.max_budget = float(cfg["live"]["max_budget"])
         self.backtest_days = int(cfg["backtest"]["days"])
         self.rank_by = cfg["backtest"]["rank_by"]
 
         self.settings = self._load_settings()
         try:
-            self.executor = self.executor_factory(self.settings["mode"], self.settings["budget"])
+            self.executor = self.executor_factory(self.settings["mode"])
         except Exception as e:  # 예: 실거래인데 키가 없어짐 → 모의투자로 안전하게 시작
             self.event("error", f"실거래 계좌를 열 수 없어서 모의투자로 시작합니다: {e}")
             self.settings["mode"] = "paper"
-            self.executor = self.executor_factory("paper", self.settings["budget"])
+            self.executor = self.executor_factory("paper")
         self.db.set_state("settings", self.settings)
         self.book = self._open_book()
-        self.slots = [Slot(cfg, c) for c in self.settings["slots"]]
-        self._ensure_book_slots()
+        self.slots: list[Slot] = []
+        self._load_slots()
 
         self.prices: dict[str, float] = {}
         stored = db.get_state("markets") or {}
@@ -165,63 +136,57 @@ class Bot:
 
     def _load_settings(self) -> dict:
         saved = self.db.get_state("settings") or {}
-        budget = saved.get("budget", self.cfg["live"]["budget"])
-        settings = {"mode": saved.get("mode", self.cfg["general"]["mode"]),
-                    "budget": "all" if budget == "all" else float(budget)}
-        if saved.get("slots"):
-            settings["slots"] = saved["slots"]
-        else:  # 예전 버전(종목 하나 + 전략 하나)에서 옮겨 오기
-            market = saved.get("market", self.cfg["general"]["market"])
-            chosen = (self.db.get_state("active_strategy") or {}).get("name")
-            strategy = chosen if chosen in STRATEGIES else self.cfg["strategy"]["name"]
-            settings["slots"] = [{"id": "s1", "market": market, "strategy": strategy, "weight": 100.0}]
-            self._migrate_old_books(market)
-        return settings
+        if "slots" in saved:  # 비중(%) 포트폴리오 시절 설정 → 금고 + 코인 계좌로 한 번 옮긴다
+            self._migrate_to_vault(saved)
+        mode = saved.get("mode", self.cfg["general"]["mode"])
+        return {"mode": mode if mode in ("paper", "live") else "paper"}
 
-    def _migrate_old_books(self, market: str) -> None:
-        old_state = self.db.get_state("bot_state") or {}
-        if old_state:
-            self.db.set_state("slot_state", {"s1": {k: old_state.get(k) for k in
-                                                    ("open_done_day", "last_buy_day", "last_stop_day")}})
-        for old_key, new_key, budget_of in (("paper_account", "book:paper", lambda a: "paper"),
-                                            ("live_account", "book:live", lambda a: a.get("budget"))):
-            acct = self.db.get_state(old_key)
-            if not acct or self.db.get_state(new_key):
-                continue
-            self.db.set_state(new_key, {
-                "budget": budget_of(acct), "reserve": 0.0, "contributions": acct.get("initial_krw", 0.0),
-                "needs_sync": acct.get("budget") == "all", "needs_alloc": False,
-                "slots": {"s1": {"market": acct.get("market", market), "krw": acct["krw"], "coin": acct["coin"],
-                                 "avg_price": acct["avg_price"], "cost": acct["cost"],
-                                 "contrib": acct.get("initial_krw", 0.0)}},
-            })
+    def _migrate_to_vault(self, saved: dict) -> None:
+        """줄마다의 원화·코인은 그대로 그 코인 계좌 것으로, 대기 원화는 금고로 옮긴다.
+        예전 설정과 장부는 backup:pre_vault에 그대로 남겨 둔다."""
+        names = self._market_names()
+        defs = {c["id"]: {**c, "name": names.get(c["market"]) or c["market"].split("-")[-1]}
+                for c in saved.get("slots", [])}
+        backup = {"settings": saved, "at": ts()}
+        for key in ("book:paper", "book:live"):
+            data = self.db.get_state(key)
+            if data is not None and "reserve" in data:
+                backup[key] = data
+                self.db.set_state(key, migrate_book(data, defs))
+        if self.db.get_state("backup:pre_vault") is None:
+            self.db.set_state("backup:pre_vault", backup)
+        self.event("info", "포트폴리오(비중)를 금고 + 코인 계좌로 옮겼어요 · 줄마다의 원화·코인은 그 계좌로, "
+                           "대기 원화는 금고로", notify=True)
 
-    def _make_executor(self, mode: str, budget):
+    def _market_names(self) -> dict:
+        """종목 → 한글 이름 (업비트 종목 목록, 하루 한 번 받아 둔다)."""
+        return {m["market"]: m.get("name") or m["market"] for m in (self.db.get_state("markets") or {}).get("list", [])}
+
+    def _make_executor(self, mode: str):
         if mode == "live":
             keys = load_keys()
             if not keys:
                 raise upbit.UpbitError("업비트 API 키가 없어요. 파이에서 python3 -m mypie.keys 로 등록하세요")
-            return LiveExecutor(self.db, upbit.UpbitClient(*keys), self.fee_rate, full=budget == "all")
+            return LiveExecutor(self.db, upbit.UpbitClient(*keys), self.fee_rate)
         return PaperExecutor(self.fee_rate)
 
     def _open_book(self) -> Book:
+        """모의투자와 실거래는 금고·코인 계좌가 따로다."""
         if self.executor.mode == "paper":
-            return Book(self.db, "book:paper", "paper", float(self.cfg["paper"]["initial_krw"]))
-        budget = self.settings["budget"]
-        return Book(self.db, "book:live", budget, 0.0 if budget == "all" else float(budget))
+            return Book(self.db, "book:paper", float(self.cfg["paper"]["initial_krw"]))
+        return Book(self.db, "book:live", 0.0)
 
-    def _ensure_book_slots(self) -> None:
-        """장부에 지금 줄이 다 있게 하고, 없어진 줄(코인 없는 것)의 원화는 대기 원화로 돌린다."""
-        ids = {s.id for s in self.slots}
-        for sid, entry in list(self.book.data["slots"].items()):
-            if sid not in ids and not entry["coin"]:
-                self.book.remove_slot(sid)
-        for s in self.slots:
-            self.book.slot(s.id, s.market)
-        self.book.save()
-
-    def _weights(self) -> dict:
-        return {s.id: s.weight for s in self.slots}
+    def _load_slots(self) -> None:
+        """장부의 코인 계좌로 Slot을 만든다. 종목·전략·주기가 그대로인 계좌는 이번 봉 계획을 이어 쓴다."""
+        old = {s.id: s for s in self.slots}
+        slots = []
+        for sid, entry in self.book.data["slots"].items():
+            slot = Slot(self.cfg, sid, entry)
+            prev = old.get(sid)
+            if prev and prev.market == slot.market and prev.rule == slot.rule and prev.tf == slot.tf:
+                slot.plan, slot.plan_day = prev.plan, prev.plan_day
+            slots.append(slot)
+        self.slots = slots
 
     def event(self, level: str, message: str, notify: bool = False) -> None:
         getattr(log, level)(message)
@@ -296,7 +261,7 @@ class Bot:
 
     def _holding(self, slot: Slot, price: float) -> bool:
         """팔 수 있을 만큼(최소 주문 금액 이상) 들고 있는지."""
-        return self.book.slot(slot.id, slot.market)["coin"] * price >= MIN_ORDER_KRW
+        return self.book.slot(slot.id)["coin"] * price >= MIN_ORDER_KRW
 
     def _tag(self, slot: Slot) -> str:
         return f"[{'실거래' if self.executor.mode == 'live' else '모의'} {slot.coin}] "
@@ -308,14 +273,16 @@ class Bot:
         self._check_network()
         self._recover()  # 끊기기 전 주문이 있으면 장부부터 맞춘다 (확인 못 하면 여기서 멈추고 다음 루프에 재시도)
         self._handle_requests()
-        prices = upbit.get_prices([s.market for s in self.slots])
+        markets = sorted({s.market for s in self.slots})
+        prices = upbit.get_prices(markets) if markets else {}
         self.prices.update(prices)
         self._sync(prices)
-        if self.book.data.get("needs_alloc"):
-            self.book.allocate(self._weights(), prices)
+        for s in [s for s in self.slots if s.closing and s.market in prices]:
+            self._close_out(s, prices[s.market])
 
         bars = {s.id: self._bar(s) for s in self.slots}
-        ready = [s for s in self.slots if s.plan_day == bars[s.id] or self._start_bar(s, bars[s.id])]
+        ready = [s for s in self.slots
+                 if not s.closing and (s.plan_day == bars[s.id] or self._start_bar(s, bars[s.id]))]
         self._open_actions(ready, bars, prices)
         for s in ready:
             self._intraday(s, prices[s.market], bars[s.id])
@@ -382,8 +349,20 @@ class Bot:
             self._set_sstate(s.id, open_done_day=bars[s.id])  # 재시작해도 봉 시작 매매를 두 번 하지 않게
 
     def _loss_line(self, slot: Slot) -> float | None:
-        b = self.book.slot(slot.id, slot.market)
+        b = self.book.slot(slot.id)
         return stoploss.line(b["cost"], b["coin"], slot.stop_loss)
+
+    def _close_out(self, slot: Slot, price: float) -> None:
+        """'팔고 지우기'를 누른 계좌: 들고 있는 코인을 팔고, 다 팔렸으면 지운다 (원화는 금고로)."""
+        if self._holding(slot, price):
+            self._sell(slot, price, "팔고 지우기")
+        if not self._holding(slot, price):
+            if self.book.slot(slot.id)["coin"] > 0:
+                self.book.clear_dust(slot.id)  # 최소 주문 금액보다 적은 자투리는 장부에서만 정리
+            moved = self.book.remove_slot(slot.id)
+            self._drop_sstate(slot.id)
+            self._load_slots()
+            self.event("info", f"{self._tag(slot)}다 팔고 계좌를 지웠어요 · 원화 {moved:,.0f}원은 금고로", notify=True)
 
     def _intraday(self, slot: Slot, price: float, bar: str) -> None:
         plan, st = slot.plan, self._sstate(slot)
@@ -397,9 +376,6 @@ class Bot:
                 self._sell(slot, price, f"{plan.sell_stop:,.0f}원 이탈")
                 self._set_sstate(slot.id, last_stop_day=bar)
                 return
-            # 입금·비중 변경으로 이 줄의 원화 몫이 생겼으면 같이 굴린다
-            if self.book.slot(slot.id)["krw"] >= TOPUP_MIN_KRW:
-                self._buy(slot, price, bar, "늘어난 몫만큼 추가 매수", topup=True)
         elif (plan.buy_stop is not None and price >= plan.buy_stop
               and st.get("last_buy_day") != bar and st.get("last_stop_day") != bar):
             self._buy(slot, price, bar, f"{plan.buy_stop:,.0f}원 돌파")
@@ -408,22 +384,20 @@ class Bot:
     # 주문 오류는 그대로 위로 올려 보낸다. 루프가 잠시 기다렸다 다시 시도하고,
     # 결과를 모르는 주문은 다음 루프의 _recover()가 업비트에 물어서 정리한다.
 
-    def _buy(self, slot: Slot, price: float, day: str, reason: str, topup: bool = False) -> bool:
-        if slot.weight <= 0:
-            return False  # 비중 0% 줄은 지켜보기만 한다
+    def _buy(self, slot: Slot, price: float, day: str, reason: str) -> bool:
+        """그 계좌 원화로만 산다. 원화가 없는 계좌는 지켜보기만 한다."""
         amount = self.book.slot(slot.id)["krw"]
         if amount < MIN_ORDER_KRW:
-            if not topup and (slot.id, day) not in self.warned:
+            if amount > 0 and (slot.id, day) not in self.warned:
                 self.warned.add((slot.id, day))
-                self.event("warning", f"{self._tag(slot)}이 줄의 원화 몫 {amount:,.0f}원이 최소 주문 금액 "
-                                      f"{MIN_ORDER_KRW:,}원보다 적어서 매수하지 않아요 (비중을 늘려 보세요)")
+                self.event("warning", f"{self._tag(slot)}매수 신호가 났지만 계좌 원화 {amount:,.0f}원이 최소 주문 금액 "
+                                      f"{MIN_ORDER_KRW:,}원보다 적어요 · 금고에서 넣어 주세요")
             return False
-        note = {"slot": slot.id, "reason": reason, "day": None if topup else day}
+        note = {"slot": slot.id, "reason": reason, "day": day}
         volume, funds, fee = self.executor.buy(slot.market, amount, price, note)
         trade = self.book.apply_buy(slot.id, volume, funds, fee, reason)
         self.executor.clear_pending()
-        if not topup:  # 추가 매수는 '오늘 산 날'로 치지 않는다 (손절 규칙이 그대로 살아 있게)
-            self._set_sstate(slot.id, last_buy_day=day, cut=False)
+        self._set_sstate(slot.id, last_buy_day=day, cut=False)
         self.db.add_trade(self.executor.mode, slot.market, trade)
         self.event("info", f"🔴 {self._tag(slot)}매수 {trade['volume']:.8g} @ {trade['price']:,.0f}원 "
                            f"({trade['krw']:,.0f}원) · {reason}", notify=True)
@@ -438,8 +412,6 @@ class Bot:
             return True
         trade = self.book.apply_sell(slot.id, *fill, reason)
         self.executor.clear_pending()
-        if slot.weight <= 0:
-            self.book.release(slot.id)  # 비중 0% 줄이 판 돈은 그 줄에 두지 않고 대기 원화로
         self.db.add_trade(self.executor.mode, slot.market, trade)
         pct = trade["profit"] / trade["cost"] * 100 if trade.get("cost") else 0.0
         self.event("info", f"🔵 {self._tag(slot)}매도 {trade['volume']:.8g} @ {trade['price']:,.0f}원 · "
@@ -454,8 +426,13 @@ class Bot:
         side = "매수" if pending["side"] == "bid" else "매도"
         market = pending.get("market", "?")
         if result["fill"]:
-            slot_id = pending.get("slot") or "s1"
-            self.book.slot(slot_id, market)
+            slot_id = pending.get("slot")
+            volume, funds, _ = result["fill"]
+            if not self.book.has(slot_id):  # 그사이 계좌가 없어졌으면 잔고 맞추기가 코인·원화를 금고·바이앤홀드로 정리한다
+                self.executor.clear_pending()
+                self.event("warning", f"[실거래] 끊기기 전에 낸 {market} {side} 주문이 체결돼 있었지만 그 계좌가 없어서 "
+                                      "잔고 맞추기로 정리해요", notify=True)
+                return
             reason = f"{pending.get('reason', '')} · 재시작 후 확인".lstrip(" ·")
             apply = self.book.apply_buy if pending["side"] == "bid" else self.book.apply_sell
             trade = apply(slot_id, *result["fill"], reason)
@@ -464,14 +441,14 @@ class Bot:
             if pending["side"] == "bid" and pending.get("day"):
                 self._set_sstate(slot_id, last_buy_day=pending["day"])
             self.event("warning", f"[실거래] 끊기기 전에 낸 {market} {side} 주문이 체결돼 있어서 장부에 반영했어요 "
-                                  f"({trade['volume']:.8g} @ {trade['price']:,.0f}원)", notify=True)
+                                  f"({volume:.8g} @ {funds / volume:,.0f}원)", notify=True)
         else:
             self.event("info", f"[실거래] 끊기기 전 {market} {side} 주문은 들어가지 않았어요. 그대로 이어서 매매해요",
                        notify=True)
 
     def _sync(self, prices: dict) -> None:
-        """계좌 전액 모드: 업비트 실제 잔고로 장부를 맞춘다 (원래 있던 코인, 입금·출금 반영)."""
-        if self.executor.mode != "live" or not self.book.full:
+        """실거래: 업비트 실제 잔고로 장부를 맞춘다 (입금·출금은 금고로, 봇이 모르는 코인은 바이앤홀드 계좌로)."""
+        if self.executor.mode != "live":
             return
         try:
             accounts = self.executor.client.accounts()
@@ -480,53 +457,136 @@ class Bot:
                 self._mark_ip_error()
             raise
         self._mark_upbit_ok()
-        flow = sync_full(self.book, accounts, {s.id: s.market for s in self.slots}, self._weights(), prices)
-        if flow:
-            kind = "입금" if flow > 0 else "출금"
-            self.event("info", f"[실거래] 계좌에 {kind}(또는 직접 매매)이 있었어요 · {flow:+,.0f}원 · "
-                               "비중대로 나눠 담고, 넣은 돈 합계에 반영해서 수익률이 틀어지지 않게 했어요", notify=True)
+        first = not self.book.data.get("synced")
+        changes = self.book.sync(accounts, prices, self._market_names())
+        if changes["added"]:
+            self._load_slots()  # 봇이 모르는 코인을 모을 바이앤홀드 계좌를 새로 만들었다
+        if first:
+            self.event("info", f"[실거래] 업비트 계좌를 연결했어요 · 원화 {self.book.vault:,.0f}원은 금고로", notify=True)
+        elif changes["cash"]:
+            kind = "입금" if changes["cash"] > 0 else "출금"
+            self.event("info", f"[실거래] 계좌에 {kind}(또는 직접 매매)이 있었어요 · {changes['cash']:+,.0f}원을 금고에 "
+                               "반영했어요 (넣은 돈 합계에도 반영해서 수익률이 틀어지지 않게)", notify=True)
+        slots = self.book.data["slots"]
+        for market, delta in changes["coins"].items():
+            coin = market.split("-")[-1]
+            hold = next((slots[x]["name"] for x in slots if slots[x]["market"] == market and self.book.is_hold(x)), coin)
+            what = (f"원래 있던(또는 직접 산) {coin} {delta:.8g}개를 '{hold}' 계좌(바이앤홀드)로 가져왔어요" if delta > 0
+                    else f"{coin} {-delta:.8g}개가 밖에서 팔렸어요 (바이앤홀드 계좌부터 뺐어요)")
+            self.event("info", f"[실거래] {what}", notify=True)
 
     # ---- 웹페이지 요청 ----
 
     def _handle_requests(self) -> None:
-        request = self.db.get_state("control_request")
-        if request is not None:
-            self._apply_control(request)
-
-    def _apply_control(self, request: dict) -> None:
-        """포트폴리오·계좌 변경. 계좌가 바뀌면 전부 팔고 새 계좌로, 줄이 빠지거나 종목·전략이 바뀌면 그 줄만 판다.
-        비중만 바뀐 줄은 팔지 않고 원화 몫만 다시 나눈다."""
-        def fail(level: str, message: str) -> None:
-            self.db.delete_state("control_request")
-            self.event(level, message)
-
-        slots, problem = validate_slots(request.get("slots", [c for c in self.settings["slots"]]))
-        mode = request.get("mode") or self.settings["mode"]
-        budget = request.get("budget") or self.settings["budget"]
-        if problem is None and mode not in ("paper", "live"):
-            problem = f"알 수 없는 계좌: {mode}"
-        if problem is None and mode == "live" and budget != "all":
+        """웹페이지 요청을 하나씩 처리하고 결과를 남긴다. 통신 오류면 요청을 남겨 두고 다음 루프에서 다시."""
+        for key, request in self.db.states(REQUEST_PREFIX):
             try:
-                budget = float(budget)
-            except (TypeError, ValueError):
-                problem = "투자 한도를 숫자로 넣어 주세요"
+                message, ok = self._apply_request(request), True
+            except VaultError as e:
+                message, ok = str(e), False
+            except (KeyError, TypeError, ValueError) as e:
+                message, ok = f"잘못된 요청이에요 ({e})", False
+            self.db.delete_state(key)
+            results = (self.db.get_state("request_results") or [])[-(MAX_RESULTS - 1):]
+            results.append({"id": request.get("id"), "ok": ok, "message": message, "at": ts()})
+            self.db.set_state("request_results", results)
+            self.event("info" if ok else "warning", message, notify=ok)
+
+    def _rule_text(self, rule: dict, tf: str, stop: float) -> str:
+        text = rule_label(rule, lambda n: STRATEGIES[n].label) + f" · {timeframes.TIMEFRAMES[tf]['short']}"
+        return text + (f" · {stoploss.text(stop)}" if stop else "")
+
+    def _apply_request(self, r: dict) -> str:
+        action = r["action"]
+        if action == "mode":
+            return self._switch_mode(r["mode"])
+        if action == "paper_cash":
+            if self.executor.mode != "paper":
+                raise VaultError("가상 입금·출금은 모의투자에서만 돼요")
+            amount = float(r["amount"])
+            self.book.deposit(amount)
+            return f"모의 금고에 {'입금' if amount > 0 else '출금'} {abs(amount):,.0f}원"
+        if action == "add":
+            market = str(r["market"])
+            if not MARKET_PATTERN.match(market):
+                raise VaultError(f"잘못된 종목이에요: {market}")
+            rule, tf, stop = check_account(r)
+            if len(self.book.data["slots"]) >= MAX_SLOTS:
+                raise VaultError(f"코인 계좌는 {MAX_SLOTS}개까지 만들 수 있어요")
+            amount = float(r.get("amount") or 0)
+            if amount > self.book.vault + 0.5:
+                raise VaultError(f"금고에 {self.book.vault:,.0f}원밖에 없어요")
+            if market not in self.prices:
+                try:
+                    upbit.get_prices([market])  # 업비트에 진짜 있는 종목인지
+                except upbit.UpbitError as e:
+                    if e.status in (400, 404):
+                        raise VaultError(f"업비트에 없는 종목이에요: {market}") from e
+                    raise  # 통신 오류면 요청을 남겨 두고 다음 루프에서 다시
+            sid = new_slot_id()
+            name = str(r.get("name") or self._market_names().get(market) or market.split("-")[-1])[:40]
+            self.book.add_slot(sid, market, name, rule, tf)
+            self.book.set_stop(sid, stop)
+            if amount > 0:
+                self.book.transfer(sid, amount)
+            self._load_slots()
+            return (f"{self.book.slot(sid)['name']} 계좌를 만들었어요 · {self._rule_text(rule, tf, stop)}"
+                    + (f" · 금고에서 {amount:,.0f}원" if amount > 0 else ""))
+
+        sid = str(r["slot"])
+        if not self.book.has(sid):
+            raise VaultError("그 코인 계좌가 없어요")
+        s = self.book.slot(sid)
+        name = s["name"]
+        price = self.prices.get(s["market"]) or s["avg_price"]
+        holding = s["coin"] * price >= MIN_ORDER_KRW
+        if action == "remove" or (action == "close" and not holding):
+            if holding:
+                raise VaultError("코인이 남아 있어서 지울 수 없어요. '팔고 지우기'를 써 주세요")
+            if s["coin"] > 0:
+                self.book.clear_dust(sid)  # 팔 수 없는 자투리는 장부에서만 정리
+            moved = self.book.remove_slot(sid)
+            self._drop_sstate(sid)
+            self._load_slots()
+            return f"{name} 계좌를 지웠어요" + (f" · 원화 {moved:,.0f}원은 금고로" if moved else "")
+        if action == "close":  # 팔고 지우기: 코인이 있으면 바로 다 판 뒤에 지운다
+            self.book.set_closing(sid, True)
+            self._load_slots()
+            return f"{name}: 코인을 다 팔고 나서 지워요"
+        if action == "cancel_close":
+            self.book.set_closing(sid, False)
+            self._load_slots()
+            return f"{name}: 팔고 지우기를 취소했어요 · 다시 전략대로 사고팔아요"
+        if action == "strategy":
+            rule, tf, stop = check_account(r)
+            same = normalize_rule(s) == rule and s.get("tf") == tf
+            self.book.set_rule(sid, rule, tf)
+            self.book.set_stop(sid, stop)
+            if not same:
+                self._drop_sstate(sid)  # 새 전략이 처음부터 판단한다 (들고 있는 코인은 그대로)
+            self._load_slots()
+            if same:
+                return f"{name} 손절선을 바꿨어요 · " + (stoploss.text(stop) if stop else "안 씀")
+            return f"{name} 전략을 바꿨어요 · {self._rule_text(rule, tf, stop)} · 코인은 그대로 두고 새 전략이 판단해요"
+        if action == "transfer":
+            if r.get("all"):
+                amount = self.book.vault if r.get("direction") == "in" else -s["krw"]
             else:
-                if not MIN_ORDER_KRW <= budget <= self.max_budget:
-                    problem = f"투자 한도는 {MIN_ORDER_KRW:,}원 ~ {self.max_budget:,.0f}원 사이여야 해요"
-        if mode == "paper":
-            budget = self.settings["budget"]  # 모의투자에서는 한도를 쓰지 않는다
-        if problem:
-            return fail("warning", f"설정 변경 실패 · {problem}")
+                amount = float(r["amount"]) * (1 if r.get("direction", "in") == "in" else -1)
+            if not amount:
+                raise VaultError("옮길 돈이 없어요")
+            self.book.transfer(sid, amount)
+            arrow = "금고 → " + name if amount > 0 else name + " → 금고"
+            return f"{arrow} {abs(amount):,.0f}원 옮겼어요" + (" · 매수 신호가 날 때 사요" if amount > 0 else "")
+        raise VaultError(f"알 수 없는 요청이에요: {action}")
 
-        current_ids = {s.id for s in self.slots}
-        for c in slots:
-            if c["id"] not in current_ids:
-                c["id"] = new_slot_id()
-        account_changed = (mode, budget) != (self.settings["mode"], self.settings["budget"])
-        if not account_changed and [c for c in slots] == [s.conf() for s in self.slots]:
-            return self.db.delete_state("control_request")
-
-        if account_changed and mode == "live":
+    def _switch_mode(self, mode: str) -> str:
+        """모의투자 ↔ 실거래. 금고·코인 계좌는 따로라서, 바꿔도 아무것도 팔지 않는다."""
+        if mode not in ("paper", "live"):
+            raise VaultError("계좌를 다시 골라 주세요")
+        if mode == self.settings["mode"]:
+            return "이미 그 계좌예요"
+        if mode == "live":
             keys = load_keys()
             try:
                 if not keys:
@@ -535,75 +595,27 @@ class Bot:
             except upbit.UpbitError as e:
                 if network.is_ip_error(e):
                     self._mark_ip_error()
-                return fail("error", f"실거래로 바꾸지 못했어요 · {e}")
+                raise VaultError(f"실거래로 바꾸지 못했어요 · {e}") from e
             self._mark_upbit_ok()
-
-        known = {s.market for s in self.slots}
-        for c in slots:  # 새 종목이 업비트에 진짜 있는지
-            if c["market"] not in known:
-                try:
-                    upbit.get_prices([c["market"]])
-                except upbit.UpbitError as e:
-                    if e.status in (400, 404):
-                        return fail("warning", f"설정 변경 실패 · 업비트에 없는 종목이에요: {c['market']}")
-                    raise  # 통신 오류면 요청을 남겨 두고 다음 루프에서 다시 시도
-
-        # 팔아야 할 줄을 먼저 판다. 실패하면(통신 오류 등) 요청을 남겨 두고 다음 루프에서 다시 시도한다.
-        new_by_id = {c["id"]: c for c in slots}
-        prices = upbit.get_prices([s.market for s in self.slots])
-        sync_prices = {**self.prices, **prices}
-        self._sync(sync_prices)
-        for s in self.slots:
-            c = new_by_id.get(s.id)
-            changed = (account_changed or c is None or c["market"] != s.market
-                       or normalize_rule(c) != s.rule or c["tf"] != s.tf)
-            if changed and self._holding(s, prices[s.market]):
-                self._sell(s, prices[s.market], "포트폴리오 변경")
-
-        before = self._describe()
-        if account_changed:
-            self.settings.update(mode=mode, budget=budget)
-            self.executor = self.executor_factory(mode, budget)
-            self.book = self._open_book()
-        old_by_id = {s.id: s for s in self.slots}
-        new_slots = []
-        for c in slots:
-            slot = Slot(self.cfg, c)
-            old = old_by_id.get(c["id"])
-            if (old and not account_changed and old.market == slot.market
-                    and old.rule == slot.rule and old.tf == slot.tf):
-                slot.plan, slot.plan_day = old.plan, old.plan_day  # 비중만 바뀐 줄은 오늘 계획 그대로
-            else:
-                self._drop_sstate(c["id"])
-            new_slots.append(slot)
-        for sid, old in old_by_id.items():
-            c = new_by_id.get(sid)
-            if c is None or c["market"] != old.market:
-                self.book.remove_slot(sid)
-                self._drop_sstate(sid)
-        self.slots = new_slots
-        self._ensure_book_slots()
-        self.book.data["needs_alloc"] = True  # 다음 단계에서 원화 몫을 새 비중대로 다시 나눈다
-        self.book.save()
-        self.settings["slots"] = [s.conf() for s in self.slots]
+        self.settings["mode"] = mode
         self.db.set_state("settings", self.settings)
+        self.executor = self.executor_factory(mode)
+        self.book = self._open_book()
+        self.slots = []
+        self._load_slots()
         self.exchange = None
-        self.last_exchange_check = 0.0
-        self.last_snapshot = 0.0
-        self.db.delete_state("control_request")
-        self.event("info", f"설정 변경 · {before} → {self._describe()}", notify=True)
+        self.last_exchange_check = self.last_snapshot = 0.0
+        self.key_day = None  # 키 만료일도 바로 다시 확인
+        label = "실거래" if mode == "live" else "모의투자"
+        return f"계좌를 {label}로 바꿨어요 · {label} 금고와 코인 계좌를 써요"
 
     def _describe(self) -> str:
-        budget = self.settings["budget"]
-        if self.settings["mode"] == "paper":
-            account = "모의투자"
-        else:
-            account = "실거래(계좌 전액)" if budget == "all" else f"실거래(한도 {budget:,.0f}원)"
-        parts = ", ".join(f"{s.coin} {s.strategy.label}"
-                          f"{'' if s.tf == '1d' else '(' + timeframes.TIMEFRAMES[s.tf]['short'] + ')'} {s.weight:g}%"
+        account = "실거래" if self.settings["mode"] == "live" else "모의투자"
+        parts = ", ".join(f"{s.name} {s.strategy.label}"
+                          f"{'' if s.tf == '1d' else '(' + timeframes.TIMEFRAMES[s.tf]['short'] + ')'}"
                           f"{' ' + stoploss.text(s.stop_loss) if s.stop_loss else ''}"
                           for s in self.slots)
-        return f"{account} · {parts}"
+        return f"{account} · 금고 {self.book.vault:,.0f}원" + (f" · {parts}" if parts else "")
 
     # ---- 집 공인 IP (업비트 허용 IP) ----
 
@@ -681,12 +693,16 @@ class Bot:
 
     def _state_text(self, slot: Slot, price: float) -> str:
         plan, st, bar = slot.plan, self._sstate(slot), slot.plan_day
+        if slot.closing:
+            return "팔고 지우는 중"
         if plan is None:
             return "계획을 세우는 중"
         daily = slot.tf == "1d"
         at = next_bar(slot.tf).astimezone(KST).strftime("%H:%M")
-        if slot.weight <= 0 and not self._holding(slot, price):
-            return "비중 0% · 지켜보기만 해요 (비중을 올리면 이 전략대로 사고팔아요)"
+        krw = self.book.slot(slot.id)["krw"]
+        if not self._holding(slot, price) and krw < MIN_ORDER_KRW:
+            return ("원화가 없어서 지켜보기만 해요 · 금고에서 넣으면 이 전략대로 사고팔아요" if krw <= 0
+                    else f"원화 {krw:,.0f}원은 최소 주문 금액({MIN_ORDER_KRW:,}원)보다 적어요 · 금고에서 더 넣어 주세요")
         if self._holding(slot, price):
             loss = self._loss_line(slot)
             cut = f" · {stoploss.text(slot.stop_loss)} {loss:,.0f}원" if loss is not None else ""
@@ -709,7 +725,7 @@ class Bot:
         slots = []
         changed = False
         for s in self.slots:
-            b = self.book.slot(s.id, s.market)
+            b = self.book.slot(s.id)
             price = self.prices.get(s.market, 0.0)
             value = b["coin"] * price
             slot_equity = b["krw"] + value
@@ -721,13 +737,14 @@ class Bot:
             changed |= bool(b.get("hold_cash")) and price > 0
             hold_value = buyhold.settle(b, price)
             slots.append({
-                "id": s.id, "market": s.market, "coin": s.coin, "weight": s.weight, "price": price,
+                "id": s.id, "name": s.name, "market": s.market, "coin": s.coin, "price": price,
                 "tf": s.tf, "tf_label": timeframes.TIMEFRAMES[s.tf]["short"], "bar": s.plan_day,
                 "next_at": ts(next_bar(s.tf)), "rank_key": s.rank_key,
                 "strategy": {"name": s.strategy.name, "label": s.strategy.label, "description": s.strategy.description,
                              "guide": s.strategy.guide, "exit_next_open": s.strategy.exit_next_open},
                 "rule": s.rule,  # 살 때·팔 때 전략
                 "stop_loss": s.stop_loss, "stop_price": self._loss_line(s) if holding else None,  # 손절선
+                "closing": s.closing,  # 팔고 지우는 중
                 "plan": asdict(s.plan) if s.plan else None,
                 "state_text": self._state_text(s, price),
                 "holding": holding,
@@ -747,14 +764,12 @@ class Bot:
         self.db.set_state("status", {
             "updated_at": ts(),
             "mode": self.executor.mode,
-            "budget": self.settings["budget"],
-            "full": self.book.full,
             "day": day,
             "interval_sec": self.interval,
             "settings": self.settings,
             "slots": slots,
-            "account": {"cash": self.book.cash(), "reserve": self.book.data["reserve"], "equity": equity,
-                        "contributions": contributions,
+            "account": {"vault": self.book.vault, "cash": self.book.cash(), "equity": equity,
+                        "contributions": contributions, "synced": self.book.data.get("synced", False),
                         "return_pct": (equity / contributions - 1) * 100 if contributions > 0 else None},
             "exchange": self.exchange,
             "network": {**net, "ip_changed": bool(net.get("upbit_ok_ip") and net.get("ip")

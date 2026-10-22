@@ -22,8 +22,8 @@ from unittest import mock
 
 from mypie import (auth, backtest, indicators, keys, krx, network, pin, reports, sshwatch, stoploss, telegram, timeframes,
                    upbit, web)
-from mypie.bot import Bot, validate_slots
-from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
+from mypie.bot import Bot, check_account
+from mypie.broker import Book, LiveExecutor, PaperExecutor, migrate_book
 from mypie.config import DEFAULTS
 from mypie.db import Database
 from mypie.strategies import STRATEGIES, create_strategy, strategy_params
@@ -31,6 +31,7 @@ from mypie.strategies.base import DayPlan, Strategy, render_text
 from mypie.strategies.combo import check_rule, make_rule, normalize_rule, rule_fields
 from mypie.timeutil import KST, trading_day
 from mypie.upbit import OrderRejected, UpbitError, make_token
+from mypie.vault import VaultError
 
 logging.disable(logging.CRITICAL)
 # 테스트 속 봇이 파이 .env의 진짜 텔레그램으로 알림을 보내지 않게 한다 (필요한 테스트는 따로 mock.patch로 바꾼다)
@@ -151,10 +152,12 @@ class TimeframeTest(unittest.TestCase):
         path, params = get.call_args[0]
         self.assertEqual((path, params["to"]), ("/candles/minutes/60", "2026-10-21T06:00:00"))
 
-    def test_slot_validation(self):
-        ok, _ = validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 10}])
-        self.assertEqual(ok[0]["tf"], "1d")                                # 주기를 안 정하면 일봉
-        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "tf": "7m", "weight": 10}])[1])
+    def test_account_validation(self):
+        rule, tf, stop = check_account({"strategy": "rsi"})
+        self.assertEqual((rule["strategy"], tf, stop), ("rsi", "1d", 0.0))  # 주기를 안 정하면 일봉, 손절선은 안 씀
+        for bad in ({"strategy": "rsi", "tf": "7m"}, {"strategy": "rsi", "stop_loss": 0.3}, {"strategy": "rsi", "sell": ["nope"]}):
+            with self.assertRaises(VaultError):
+                check_account(bad)
 
 
 class IndicatorTest(unittest.TestCase):
@@ -398,22 +401,6 @@ class ComboRuleTest(unittest.TestCase):
         self.assertIn("데이터 부족", plan.note)
 
 
-class ValidateSlotsTest(unittest.TestCase):
-    def test_rules(self):
-        ok, problem = validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 60},
-                                      {"market": "KRW-ETH", "strategy": "turtle", "weight": "40"}])
-        self.assertIsNone(problem)
-        self.assertEqual([s["weight"] for s in ok], [60.0, 40.0])
-        self.assertIn("100%", validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 70},
-                                              {"market": "KRW-ETH", "strategy": "rsi", "weight": 40}])[1])
-        self.assertIn("두 번", validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 10},
-                                              {"market": "KRW-BTC", "strategy": "macd", "weight": 10}])[1])
-        self.assertIsNotNone(validate_slots([])[1])
-        self.assertIsNotNone(validate_slots([{"market": "BTC", "strategy": "rsi", "weight": 10}])[1])
-        self.assertIsNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 0}])[1])   # 0%는 지켜보기
-        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": -1}])[1])
-
-
 class TempDbTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -426,82 +413,76 @@ class TempDbTest(unittest.TestCase):
 
 
 class BookTest(TempDbTest):
-    def test_allocate_splits_cash_by_weight(self):
-        book = Book(self.db, "book:paper", "paper", 1_000_000)
-        book.slot("a", "KRW-BTC"), book.slot("b", "KRW-ETH")
-        book.allocate({"a": 50, "b": 30}, {"KRW-BTC": 100, "KRW-ETH": 100})
-        self.assertAlmostEqual(book.slot("a")["krw"], 500_000)
-        self.assertAlmostEqual(book.slot("b")["krw"], 300_000)
-        self.assertAlmostEqual(book.data["reserve"], 200_000)          # 비중에 안 들어간 20%는 대기
-
-    def test_allocate_counts_coins_already_held(self):
-        book = Book(self.db, "book:paper", "paper", 400_000)
-        book.slot("a", "KRW-BTC").update(coin=6000.0, cost=600_000.0, avg_price=100.0)
-        book.slot("b", "KRW-ETH")
-        book.allocate({"a": 50, "b": 50}, {"KRW-BTC": 100, "KRW-ETH": 100})
-        self.assertAlmostEqual(book.slot("a")["krw"], 0)               # 이미 몫보다 많이 들고 있음
-        self.assertAlmostEqual(book.slot("b")["krw"], 400_000)
+    def test_vault_accounts_transfer_and_remove(self):
+        b = Book(self.db, "book:paper", 1_000_000)
+        b.add_slot("a", "KRW-BTC", "비트코인", "rsi", "240m")
+        b.add_slot("b", "KRW-BTC", "비트코인", "macd", "1d")              # 같은 코인도 여러 계좌
+        self.assertEqual((b.slot("a")["name"], b.slot("b")["name"]), ("비트코인", "비트코인 2"))
+        self.assertEqual((b.slot("a")["strategy"], b.slot("a")["tf"]), ("rsi", "240m"))
+        b.transfer("a", 300_000)
+        self.assertEqual((b.vault, b.slot("a")["krw"]), (700_000, 300_000))
+        with self.assertRaises(VaultError):
+            b.transfer("a", 800_000)                                    # 금고보다 많이
+        with self.assertRaises(VaultError):
+            b.transfer("a", -400_000)                                   # 계좌 원화보다 많이
+        ex = PaperExecutor(0.0005)
+        b.apply_buy("a", *ex.buy("KRW-BTC", 300_000, 100, {}), "test")
+        with self.assertRaises(VaultError):
+            b.remove_slot("a")                                          # 코인이 있으면 못 지운다
+        trade = b.apply_sell("a", *ex.sell("KRW-BTC", b.slot("a")["coin"], 110, {}), "test")
+        self.assertEqual(trade["slot"], "a")
+        self.assertEqual(b.vault, 700_000)                              # 판 돈은 계좌에 남는다
+        moved = b.remove_slot("a")
+        self.assertAlmostEqual(b.vault, 700_000 + moved)                # 지우면 원화는 금고로
+        b.deposit(-50_000)                                              # 모의투자 가상 출금
+        self.assertAlmostEqual(b.data["contributions"], 950_000)
 
     def test_buy_sell_round_trip(self):
-        book = Book(self.db, "book:paper", "paper", 0)
-        book.slot("a", "KRW-BTC")["krw"] = 100_000
+        book = Book(self.db, "book:paper", 0)
+        book.add_slot("a", "KRW-BTC", "BTC", "rsi", "1d")
+        book.slot("a")["krw"] = 100_000
         ex = PaperExecutor(0.0005)
         book.apply_buy("a", *ex.buy("KRW-BTC", 100_000, 100, {}), "test")
         trade = book.apply_sell("a", *ex.sell("KRW-BTC", book.slot("a")["coin"], 110, {}), "test")
         self.assertAlmostEqual(book.slot("a")["krw"], 100_000 / 1.0005 * 1.1 * 0.9995)
         self.assertAlmostEqual(trade["profit"], book.slot("a")["krw"] - 100_000)
 
-    def test_full_mode_sync_takes_existing_coins_and_splits_deposits(self):
-        book = Book(self.db, "book:live", "all", 0)
-        prices = {"KRW-BTC": 100, "KRW-ETH": 100}
-        slots, weights = {"a": "KRW-BTC", "b": "KRW-ETH"}, {"a": 50, "b": 50}
-        client = FakeClient(krw=50_000, coins={"BTC": 100.0, "DOGE": 5.0})  # DOGE는 포트폴리오 밖 → 무시
-        self.assertEqual(sync_full(book, client.accounts(), slots, weights, prices), 0)
-        self.assertEqual(book.slot("a")["coin"], 100.0)
-        self.assertAlmostEqual(book.data["contributions"], 60_000)    # 원화 5만 + BTC 1만
-        book.allocate(weights, prices)
-        self.assertAlmostEqual(book.slot("a")["krw"], 20_000)          # 3만 몫 − 이미 가진 BTC 1만
-        self.assertAlmostEqual(book.slot("b")["krw"], 30_000)
+    def test_live_sync_keeps_outside_coins_in_buy_and_hold_and_deposits_in_vault(self):
+        b = Book(self.db, "book:live", 0)
+        b.add_slot("a", "KRW-BTC", "비트코인", "volatility_breakout", "1d")
+        acc = lambda krw, btc: FakeClient(krw=krw, coins={"BTC": btc, "DOGE": 5.0}).accounts()
+        changes = b.sync(acc(50_000, 100.0), {"KRW-BTC": 100}, {"KRW-BTC": "비트코인"})  # DOGE는 계좌가 없어서 그대로
+        hold = changes["added"][0]                                      # 원래 있던 BTC는 바이앤홀드 계좌로
+        self.assertEqual((b.slot(hold)["name"], b.is_hold(hold), b.slot(hold)["coin"]),
+                         ("비트코인 · 원래 있던 코인", True, 100.0))
+        self.assertEqual((b.vault, b.slot("a")["coin"]), (50_000, 0.0))
+        self.assertAlmostEqual(b.slot(hold)["cost"], 10_000)            # 넘겨받을 때 시세가 원가
+        self.assertAlmostEqual(b.data["contributions"], 60_000)
+        b.transfer("a", 20_000)
+        changes = b.sync(acc(80_000, 100.0), {"KRW-BTC": 100})         # 3만 원 입금 → 금고로 (자동으로 사지 않는다)
+        self.assertAlmostEqual(changes["cash"], 30_000)
+        self.assertEqual((b.vault, b.slot("a")["krw"]), (60_000, 20_000))
+        b.slot("a").update(coin=10.0, cost=1_000.0, avg_price=100.0)    # 봇이 산 10개 (합계 110개)
+        b.sync(acc(80_000, 70.0), {"KRW-BTC": 100})                    # 밖에서 40개 팔림 → 바이앤홀드 계좌부터
+        self.assertEqual((b.slot(hold)["coin"], b.slot("a")["coin"]), (60.0, 10.0))
+        b.sync(acc(10_000, 70.0), {"KRW-BTC": 100})                    # 금고보다 많이 출금 → 계좌 원화에서
+        self.assertEqual((b.vault, b.slot("a")["krw"]), (0.0, 10_000))
 
-        client.krw += 30_000                                            # 입금 → 반반 나눠 담기
-        self.assertAlmostEqual(sync_full(book, client.accounts(), slots, weights, prices), 30_000)
-        self.assertAlmostEqual(book.slot("a")["krw"], 35_000)
-        self.assertAlmostEqual(book.slot("b")["krw"], 45_000)
-        self.assertAlmostEqual(book.data["contributions"], 90_000)
-
-        client.krw -= 40_000                                            # 출금 → 각 줄 원화에서 나눠 빼기
-        sync_full(book, client.accounts(), slots, weights, prices)
-        self.assertAlmostEqual(book.cash(), 40_000)
-
-    def test_full_mode_profit_counts_only_after_takeover(self):
-        book = Book(self.db, "book:live", "all", 0)
-        slots, weights = {"a": "KRW-BTC"}, {"a": 100}
-        old = [{"currency": "KRW", "balance": "0", "avg_buy_price": "0"},
-               {"currency": "BTC", "balance": "100", "avg_buy_price": "40"}]   # 예전에 40원에 산 코인
-        sync_full(book, old, slots, weights, {"KRW-BTC": 100})
-        self.assertAlmostEqual(book.slot("a")["cost"], 10_000)          # 넘겨받을 때 시세(100원)가 원가
-        self.assertAlmostEqual(book.slot("a")["avg_price"], 100)
-
-        trade = book.apply_sell("a", *PaperExecutor(0.0005).sell("KRW-BTC", 100, 110, {}), "test")
-        self.assertAlmostEqual(trade["profit"], 11_000 * 0.9995 - 10_000)  # 봇이 굴린 동안 오른 만큼만
-
-    def test_full_mode_sync_keeps_bot_cost_and_values_outside_coins_at_market(self):
-        book = Book(self.db, "book:live", "all", 0)
-        slots, weights = {"a": "KRW-BTC"}, {"a": 100}
-        acc = lambda coin, avg: [{"currency": "KRW", "balance": "0", "avg_buy_price": "0"},
-                                 {"currency": "BTC", "balance": str(coin), "avg_buy_price": str(avg)}]
-        sync_full(book, acc(100, 40), slots, weights, {"KRW-BTC": 100})
-        sync_full(book, acc(100, 40), slots, weights, {"KRW-BTC": 120})  # 업비트 평균가로 덮어쓰지 않는다
-        self.assertAlmostEqual(book.slot("a")["cost"], 10_000)
-
-        self.assertAlmostEqual(sync_full(book, acc(150, 60), slots, weights, {"KRW-BTC": 120}), 6_000)  # 코인 입금
-        self.assertAlmostEqual(book.slot("a")["cost"], 16_000)          # 들어온 50개는 지금 시세 120원으로
-        self.assertAlmostEqual(book.slot("a")["avg_price"], 16_000 / 150)
-
-        sync_full(book, acc(75, 60), slots, weights, {"KRW-BTC": 120})   # 절반을 밖에서 뺌
-        self.assertAlmostEqual(book.slot("a")["cost"], 8_000)
-        sync_full(book, acc(0, 0), slots, weights, {"KRW-BTC": 120})
-        self.assertEqual((book.slot("a")["cost"], book.slot("a")["avg_price"]), (0.0, 0.0))
+    def test_old_weight_book_is_migrated(self):
+        ledger = {"krw": 0.0, "coin": 0.0, "avg_price": 0.0, "cost": 0.0, "contrib": 0.0, "hold": 0.0, "hold_cash": 0.0}
+        old = {"budget": "all", "reserve": 1_000.0, "contributions": 50_000.0, "needs_sync": False, "needs_alloc": False,
+               "slots": {"a": {**ledger, "market": "KRW-BTC", "krw": 40_000.0, "coin": 0.1, "cost": 9.0},
+                         "x": {**ledger, "market": "KRW-ETH", "coin": 2.0}}}
+        defs = {"a": {"id": "a", "market": "KRW-BTC", "strategy": "bollinger", "buy": ["bollinger", "macd"], "buy_op": "or",
+                      "sell": ["momentum", "stochastic"], "sell_op": "and", "tf": "240m", "weight": 100.0,
+                      "stop_loss": 10, "name": "비트코인"}}
+        new = migrate_book(old, defs)
+        self.assertEqual((new["vault"], new["synced"]), (1_000.0, True))  # 대기 원화 → 금고
+        self.assertFalse({"budget", "reserve", "needs_alloc", "needs_sync"} & set(new))
+        a = new["slots"]["a"]
+        self.assertEqual((a["name"], a["tf"], a["buy"], a["stop_loss"], a["krw"], a["coin"]),
+                         ("비트코인", "240m", ["bollinger", "macd"], 10, 40_000.0, 0.1))  # 원화·코인은 그대로 그 계좌 것
+        self.assertEqual(new["slots"]["x"]["strategy"], "buy_and_hold")  # 설정에 없던 줄(코인만 남은 것)은 바이앤홀드
 
 
 class LiveExecutorTest(TempDbTest):
@@ -524,9 +505,9 @@ class LiveExecutorTest(TempDbTest):
         self.assertEqual(client.attempts, 0)
         self.assertIsNone(ex.pending())
 
-    def test_full_mode_keeps_margin(self):
+    def test_keeps_margin(self):
         client = FakeClient(krw=100_000)
-        LiveExecutor(self.db, client, 0.0005, full=True).buy("KRW-BTC", 100_000, 100, {})
+        LiveExecutor(self.db, client, 0.0005).buy("KRW-BTC", 100_000, 100, {})
         self.assertEqual(client.orders[0]["price"], str(math.floor(100_000 * 0.995 / 1.0005)))
 
 
@@ -556,20 +537,36 @@ class BotFlowTest(TempDbTest):
         self.client = FakeClient()
         self.market = FakeMarket()
 
-    def factory(self, mode, budget):
+    def factory(self, mode):
         if mode == "live":
-            return LiveExecutor(self.db, self.client, 0.0005, full=budget == "all")
+            return LiveExecutor(self.db, self.client, 0.0005)
         return PaperExecutor(0.0005)
 
-    def portfolio(self, *slots, mode="paper", budget=100_000):
-        self.db.set_state("settings", {"mode": mode, "budget": budget, "slots": [
-            {"id": sid, "market": m, "strategy": st, "weight": w} for sid, m, st, w in slots]})
+    def accounts(self, *rows, mode="paper", vault=0.0):
+        """금고와 코인 계좌를 바로 만든다. 줄: (id, 종목, 전략, 원화[, {판단 주기·손절선 같은 것}])."""
+        slots = {}
+        for sid, market, strategy, krw, *extra in rows:
+            slots[sid] = {"market": market, "name": market.split("-")[1], "strategy": strategy, "tf": "1d",
+                          "krw": float(krw), "coin": 0.0, "avg_price": 0.0, "cost": 0.0,
+                          "contrib": float(krw), "hold": 0.0, "hold_cash": float(krw), **(extra[0] if extra else {})}
+        total = vault + sum(s["krw"] for s in slots.values())
+        self.db.set_state("settings", {"mode": mode})
+        self.db.set_state(f"book:{mode}", {"vault": float(vault), "slots": slots, "contributions": total,
+                                           "synced": mode == "live"})
+        if mode == "live":
+            self.client.krw = total                                     # 업비트 실제 원화와 장부가 맞게
+
+    def request(self, n, **r):
+        self.db.set_state(f"request:{n:04d}", {"id": str(n), **r})
+
+    def results(self):
+        return [(r["ok"], r["message"]) for r in self.db.get_state("request_results") or []]
 
     def make_bot(self):
         return Bot(self.cfg, self.db, self.factory)
 
     def go(self, bot, day, steps=1, errors_ok=False, ip="1.1.1.1", hour=None):
-        """day 거래일(분봉 줄이 있으면 hour 봉 키도)에 봇을 steps번 돌린다."""
+        """day 거래일(분봉 계좌가 있으면 hour 봉 키도)에 봇을 steps번 돌린다."""
         with mock.patch("mypie.bot.trading_day", return_value=day), \
              mock.patch("mypie.bot.bar_key", side_effect=lambda tf, now=None: hour), \
              mock.patch("mypie.upbit.get_prices", side_effect=self.market.prices), \
@@ -587,24 +584,33 @@ class BotFlowTest(TempDbTest):
     def btc(self, day, price, today_open=100, prev=None):
         self.market.set("KRW-BTC", day, today_open, prev or self.BTC_PREV, price)
 
+    def eth(self, day, price, today_open=100):
+        self.market.set("KRW-ETH", day, today_open, candle("2026-10-20", today_open, today_open, today_open, today_open), price)
+
     def trades(self):
         return [(t["side"], t["market"]) for t in reversed(self.db.recent_trades())]
 
     # ---- 모의투자 ----
 
-    def test_migrates_old_single_strategy_setup(self):
-        self.db.set_state("settings", {"market": "KRW-BTC", "mode": "paper", "budget": 100_000})
-        self.db.set_state("active_strategy", {"name": "turtle"})
-        self.db.set_state("paper_account", {"krw": 900_000.0, "coin": 0.0, "avg_price": 0.0, "cost": 0.0,
-                                            "initial_krw": 1_000_000.0})
+    def test_old_portfolio_moves_to_vault_on_start(self):
+        ledger = {"krw": 0.0, "coin": 0.0, "avg_price": 0.0, "cost": 0.0, "contrib": 0.0, "hold": 0.0, "hold_cash": 0.0}
+        self.db.set_state("settings", {"mode": "paper", "budget": 100_000, "slots": [
+            {"id": "a", "market": "KRW-BTC", "strategy": "rsi", "tf": "240m", "weight": 100.0},
+            {"id": "b", "market": "KRW-ETH", "strategy": "macd", "weight": 0.0}]})
+        self.db.set_state("book:paper", {"budget": "paper", "reserve": 5_000.0, "contributions": 1_000_000.0,
+                                         "needs_alloc": False, "slots": {"a": {**ledger, "market": "KRW-BTC", "krw": 995_000.0},
+                                                                         "b": {**ledger, "market": "KRW-ETH"}}})
         bot = self.make_bot()
-        self.assertEqual([s.conf() for s in bot.slots],
-                         [{"id": "s1", "market": "KRW-BTC", "strategy": "turtle", "tf": "1d", "weight": 100.0}])
-        self.assertAlmostEqual(bot.book.slot("s1")["krw"], 900_000)
-        self.assertAlmostEqual(bot.book.data["contributions"], 1_000_000)
+        self.assertEqual(self.db.get_state("settings"), {"mode": "paper"})
+        self.assertEqual(bot.book.vault, 5_000)                          # 대기 원화 → 금고
+        self.assertEqual([(s.id, s.market, s.rule["strategy"], s.tf) for s in bot.slots],
+                         [("a", "KRW-BTC", "rsi", "240m"), ("b", "KRW-ETH", "macd", "1d")])
+        self.assertEqual(bot.book.slot("a")["krw"], 995_000)             # 줄의 원화는 그대로 그 계좌 것
+        self.assertIn("book:paper", self.db.get_state("backup:pre_vault"))  # 예전 장부는 백업
+        self.assertEqual(self.make_bot().book.vault, 5_000)               # 다시 켜도 한 번만 옮긴다
 
     def test_breakout_buy_survives_restart_and_sells_next_day(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 100))
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 100_000))
         bot = self.make_bot()
         self.btc(self.D1, 110)
         self.go(bot, self.D1)                                          # 110 < 120 대기
@@ -620,63 +626,118 @@ class BotFlowTest(TempDbTest):
         self.assertEqual(self.trades(), [("buy", "KRW-BTC"), ("sell", "KRW-BTC")])
         self.assertGreater(self.db.recent_trades()[0]["profit"], 0)
 
-    def test_two_slots_trade_separately_and_hold_signal_is_not_sold(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 50), ("b", "KRW-ETH", "buy_and_hold", 30))
+    def test_two_accounts_trade_separately_and_hold_signal_is_not_sold(self):
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 500_000), ("b", "KRW-ETH", "buy_and_hold", 300_000),
+                      vault=200_000)
         bot = self.make_bot()
-        eth_prev = candle("2026-10-20", 50, 50, 50, 50)
         self.btc(self.D1, 110)
-        self.market.set("KRW-ETH", self.D1, 50, eth_prev, 50)
+        self.eth(self.D1, 50, today_open=50)
         self.go(bot, self.D1)                                          # ETH 09시 매수 (30만), BTC 대기
         self.btc(self.D1, 125)
         self.go(bot, self.D1)                                          # BTC 돌파 매수 (50만)
         buys = {t["market"]: t["krw"] for t in self.db.recent_trades()}
         self.assertAlmostEqual(buys["KRW-ETH"], 300_000)
         self.assertAlmostEqual(buys["KRW-BTC"], 500_000)
-        self.assertAlmostEqual(bot.book.data["reserve"], 200_000)       # 비중 밖 20%는 그대로
-
+        self.assertAlmostEqual(bot.book.vault, 200_000)                 # 금고는 그대로
         eth_coin = bot.book.slot("b")["coin"]
         self.btc(self.D2, 130, today_open=130, prev=candle(self.D1, 100, 130, 100, 126))
         self.market.set("KRW-ETH", self.D2, 55, candle(self.D1, 50, 55, 50, 55), 55)
         self.go(bot, self.D2)                                          # 다음 날 09시
-        self.assertEqual(self.trades()[-1], ("sell", "KRW-BTC"))        # 변동성 돌파 줄만 판다
-        self.assertEqual(bot.book.slot("b")["coin"], eth_coin)          # '보유 유지' 줄은 그대로
+        self.assertEqual(self.trades()[-1], ("sell", "KRW-BTC"))        # 변동성 돌파 계좌만 판다
+        self.assertEqual(bot.book.slot("b")["coin"], eth_coin)          # '보유 유지' 계좌는 그대로
+        self.assertGreater(bot.book.slot("a")["krw"], 0)                # 판 돈은 그 계좌에 남는다
 
-    def test_weight_change_does_not_sell_but_removed_slot_does(self):
-        self.portfolio(("a", "KRW-BTC", "buy_and_hold", 50), ("b", "KRW-ETH", "buy_and_hold", 50))
-        bot = self.make_bot()
-        self.btc(self.D1, 100)
-        self.market.set("KRW-ETH", self.D1, 100, candle("2026-10-20", 100, 100, 100, 100), 100)
-        self.go(bot, self.D1)                                          # 둘 다 09시 매수
-        btc_coin = bot.book.slot("a")["coin"]
-        self.db.set_state("control_request", {"mode": "paper", "slots": [
-            {"id": "a", "market": "KRW-BTC", "strategy": "buy_and_hold", "weight": 80}]})
-        self.go(bot, self.D1, steps=2)
-        self.assertEqual(self.trades()[2], ("sell", "KRW-ETH"))         # 빠진 줄만 판다
-        self.assertGreater(bot.book.slot("a")["coin"], btc_coin)        # 비중이 늘어난 몫만큼 추가 매수
-        self.assertEqual([s.id for s in bot.slots], ["a"])
-        self.assertEqual(self.make_bot().settings["slots"][0]["weight"], 80.0)  # 재시작해도 유지
-
-    def test_buy_and_sell_rule_is_saved_and_reported(self):
-        self.portfolio(("a", "KRW-BTC", "rsi", 100))
+    def test_requests_add_transfer_change_and_sell_then_remove(self):
+        self.accounts(vault=1_000_000)
         bot = self.make_bot()
         self.btc(self.D1, 100)
         rule = {"strategy": "rsi", "buy": ["rsi", "macd"], "buy_op": "or", "sell": ["ma_cross"], "sell_op": "and"}
-        self.db.set_state("control_request", {"mode": "paper", "slots": [
-            {"id": "a", "market": "KRW-BTC", **rule, "weight": 100}]})
+        self.request(1, action="add", market="KRW-BTC", strategy="buy_and_hold", tf="1d", stop_loss=0, amount=300_000)
+        self.go(bot, self.D1)                                          # 계좌가 생기고 09시 매수
+        sid = bot.slots[0].id
+        self.assertEqual(self.trades(), [("buy", "KRW-BTC")])
+        self.assertEqual((bot.slots[0].name, bot.book.vault), ("BTC", 700_000))
+        self.request(2, action="transfer", slot=sid, direction="in", amount=100_000)
+        self.go(bot, self.D1)
+        self.assertEqual(len(self.trades()), 1)                         # 들고 있으면 늘어난 원화로 더 사지 않는다
+        self.assertEqual((bot.book.vault, bot.book.slot(sid)["krw"]), (600_000, 100_000))
+        self.request(3, action="strategy", slot=sid, **rule, tf="1d", stop_loss=10)
+        self.go(bot, self.D1)
+        s = bot.book.slot(sid)
+        self.assertEqual((bot.slots[0].rule, s["stop_loss"]), (rule, 10))
+        self.assertGreater(s["coin"], 0)                                # 전략을 바꿔도 코인은 그대로
+        self.request(4, action="remove", slot=sid)
+        self.go(bot, self.D1)
+        self.assertFalse(self.results()[-1][0])                         # 코인이 있으면 그냥은 못 지운다
+        self.request(5, action="close", slot=sid)
+        self.go(bot, self.D1)                                          # 팔고 지우기: 바로 팔고 지운다
+        self.assertEqual(self.trades()[-1], ("sell", "KRW-BTC"))
+        self.assertEqual(bot.slots, [])
+        self.assertAlmostEqual(bot.book.vault, bot.book.cash())         # 판 돈과 원화는 금고로
+        self.request(6, action="add", market="KRW-NOPE", strategy="rsi", tf="1d", amount=0)
+        self.go(bot, self.D1)
+        self.assertFalse(self.results()[-1][0])                         # 업비트에 없는 종목
+
+    def test_close_can_be_cancelled_before_it_runs(self):
+        self.accounts(("a", "KRW-BTC", "buy_and_hold", 100_000))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.go(bot, self.D1)
+        self.request(1, action="close", slot="a")
+        self.request(2, action="cancel_close", slot="a")                 # 같은 루프에서 차례로 처리된다
+        self.go(bot, self.D1)
+        self.assertEqual(self.trades(), [("buy", "KRW-BTC")])
+        self.assertFalse(bot.slots[0].closing)
+
+    def test_same_coin_in_two_accounts(self):
+        self.accounts(("a", "KRW-BTC", "buy_and_hold", 100_000), ("b", "KRW-BTC", "buy_and_hold", 50_000))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.go(bot, self.D1)
+        rows = self.db.recent_trades()
+        self.assertEqual(sorted((r["slot"], round(r["krw"])) for r in rows), [("a", 100_000), ("b", 50_000)])
+
+    def test_account_without_money_only_watches(self):
+        self.accounts(("a", "KRW-BTC", "buy_and_hold", 100_000), ("b", "KRW-ETH", "buy_and_hold", 0))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.eth(self.D1, 100)
+        self.go(bot, self.D1, steps=2)
+        self.assertEqual(self.trades(), [("buy", "KRW-BTC")])          # 원화가 없는 계좌는 매수 신호가 나도 안 산다
+        state = {x["id"]: x["state_text"] for x in self.db.get_state("status")["slots"]}
+        self.assertIn("지켜보기", state["b"])
+        self.assertFalse(any("최소 주문" in e["message"] for e in self.db.recent_events(20)))  # 경고도 안 한다
+
+    def test_paper_cash_and_mode_switch(self):
+        self.accounts(("a", "KRW-BTC", "rsi", 100_000))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.request(1, action="paper_cash", amount=500_000)
+        with mock.patch("mypie.bot.load_keys", return_value=None):
+            self.request(2, action="mode", mode="live")
+            self.go(bot, self.D1)
+        self.assertEqual(bot.book.vault, 500_000)
+        self.assertFalse(self.results()[-1][0])                         # 키가 없으면 실거래로 못 바꾼다
+        with mock.patch("mypie.bot.load_keys", return_value=("a", "b")), \
+             mock.patch("mypie.upbit.UpbitClient", return_value=self.client):
+            self.request(3, action="mode", mode="live")
+            self.go(bot, self.D1)
+        self.assertEqual((bot.executor.mode, bot.book.key, bot.slots), ("live", "book:live", []))
+        self.assertAlmostEqual(bot.book.vault, self.client.krw)          # 업비트 원화 전부가 실거래 금고로
+        self.assertEqual(self.db.get_state("book:paper")["vault"], 500_000)  # 모의 금고·계좌는 따로 그대로
+        self.assertEqual(self.db.get_state("key_info")["expire_at"][:10], "2027-10-21")
+
+    def test_buy_and_sell_rule_is_saved_and_reported(self):
+        rule = {"strategy": "rsi", "buy": ["rsi", "macd"], "buy_op": "or", "sell": ["ma_cross"], "sell_op": "and"}
+        self.accounts(("a", "KRW-BTC", "rsi", 100_000, rule))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
         self.go(bot, self.D1)
         self.assertEqual((bot.slots[0].rule, bot.slots[0].strategy.name), (rule, "combo"))
-        saved = self.make_bot().settings["slots"][0]                    # 재시작해도 유지
-        self.assertEqual({k: saved[k] for k in rule}, rule)
         self.assertEqual(self.db.get_state("status")["slots"][0]["rule"], rule)
-        self.db.set_state("control_request", {"mode": "paper", "slots": [   # 전략 하나로 되돌리면 예전 모양 그대로
-            {"id": "a", "market": "KRW-BTC", "strategy": "rsi", "weight": 100}]})
-        self.go(bot, self.D1)
-        self.assertEqual(bot.slots[0].strategy.name, "rsi")
-        self.assertNotIn("buy", self.make_bot().settings["slots"][0])
-        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "sell": ["nope"], "weight": 10}])[1])
 
     def test_key_expiry_alerts_once_a_day_with_renewal_steps(self):
-        self.portfolio(("a", "KRW-BTC", "rsi", 100))
+        self.accounts(("a", "KRW-BTC", "rsi", 100_000))
         bot = self.make_bot()
         sent = []
         bot.notifier = sent.append
@@ -705,10 +766,8 @@ class BotFlowTest(TempDbTest):
         self.assertIn("만료됐거나", sent[-1])
 
     def test_stop_loss_sells_and_waits_for_a_fresh_signal(self):
-        self.db.set_state("settings", {"mode": "paper", "budget": 100_000, "slots": [
-            {"id": "a", "market": "KRW-BTC", "strategy": "buy_and_hold", "weight": 100, "stop_loss": 10}]})
+        self.accounts(("a", "KRW-BTC", "buy_and_hold", 100_000, {"stop_loss": 10}))
         bot = self.make_bot()
-        self.assertEqual(bot.slots[0].conf()["stop_loss"], 10)
         self.btc(self.D1, 100)
         self.go(bot, self.D1)                                          # 09시 매수 (100원)
         self.assertIn("손절선 −10%", self.db.get_state("status")["slots"][0]["state_text"])
@@ -720,11 +779,9 @@ class BotFlowTest(TempDbTest):
         self.go(bot, self.D2, steps=2)                                  # 바이앤홀드는 매수 신호가 안 꺼져서 다시 안 산다
         self.assertEqual(len(self.trades()), 2)
         self.assertIn("손절 뒤 쉬는 중", self.db.get_state("status")["slots"][0]["state_text"])
-        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 10, "stop_loss": 0.3}])[1])
-        self.assertEqual(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 10, "stop_loss": "7"}])[0][0]["stop_loss"], 7)
 
-    def test_sold_row_is_not_bought_back_at_the_same_open(self):
-        self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100))
+    def test_sold_account_is_not_bought_back_at_the_same_open(self):
+        self.accounts(("a", "KRW-BTC", "buy_and_hold", 100_000))
         bot = self.make_bot()
         self.btc(self.D1, 100)
         self.go(bot, self.D1)                                          # 09시 매수
@@ -735,58 +792,39 @@ class BotFlowTest(TempDbTest):
         self.assertEqual(self.trades(), [("buy", "KRW-BTC"), ("sell", "KRW-BTC")])  # 팔기만 하고 바로 다시 사지 않는다
 
     def test_status_shows_buy_and_hold_comparison(self):
-        self.portfolio(("a", "KRW-BTC", "rsi", 100))
+        self.accounts(("a", "KRW-BTC", "rsi", 100_000))
         bot = self.make_bot()
         self.btc(self.D1, 100)
-        self.go(bot, self.D1)                                          # 100원일 때 줄에 돈이 들어옴
+        self.go(bot, self.D1)                                          # 100원일 때 계좌에 돈이 들어옴
         self.btc(self.D1, 110)
         self.go(bot, self.D1)
         x = self.db.get_state("status")["slots"][0]
         self.assertAlmostEqual(x["hold_return_pct"], 10.0)            # 그냥 들고 있었다면 +10%
-        self.assertAlmostEqual(x["hold_pnl"], 100_000)
+        self.assertAlmostEqual(x["hold_pnl"], 10_000)
         self.assertAlmostEqual(x["return_pct"], 0.0)                  # RSI는 아직 안 샀다
+        self.assertEqual(self.db.get_state("status")["account"]["vault"], 0.0)
 
-    def test_zero_weight_row_only_watches(self):
-        self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100), ("b", "KRW-ETH", "buy_and_hold", 0))
+    def test_hourly_account_plans_every_hour_and_daily_account_is_untouched(self):
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 100_000),
+                      ("h", "KRW-ETH", "volatility_breakout", 100_000, {"tf": "60m"}))
         bot = self.make_bot()
-        self.btc(self.D1, 100)
-        self.market.set("KRW-ETH", self.D1, 100, candle("2026-10-20", 100, 100, 100, 100), 100)
-        self.go(bot, self.D1, steps=2)
-        self.assertEqual(self.trades(), [("buy", "KRW-BTC")])          # 0% 줄은 매수 신호가 나도 안 산다
-        state = {x["id"]: x["state_text"] for x in self.db.get_state("status")["slots"]}
-        self.assertIn("지켜보기", state["b"])
-
-    def test_zero_weight_row_sells_held_coins_and_frees_the_money(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 50), ("b", "KRW-ETH", "buy_and_hold", 50))
-        bot = self.make_bot()
-        self.btc(self.D1, 125)                                          # 목표가 120 돌파 → BTC 매수
-        self.market.set("KRW-ETH", self.D1, 100, candle("2026-10-20", 100, 100, 100, 100), 100)
-        self.go(bot, self.D1)
-        self.db.set_state("control_request", {"mode": "paper", "slots": [   # BTC 줄을 0%로 (비중만 바꿔서 바로 팔진 않음)
-            {"id": "a", "market": "KRW-BTC", "strategy": "volatility_breakout", "weight": 0},
-            {"id": "b", "market": "KRW-ETH", "strategy": "buy_and_hold", "weight": 50}]})
-        self.go(bot, self.D1, steps=2)
-        self.assertEqual(self.trades(), [("buy", "KRW-ETH"), ("buy", "KRW-BTC")])  # ETH는 09시, BTC는 장중 돌파
-        self.btc(self.D2, 150, today_open=125, prev=candle(self.D1, 100, 130, 95, 125))
-        self.go(bot, self.D2, steps=2)                                  # 다음 날 09시 매도, 목표가를 넘어도 다시 안 삼
-        self.assertEqual(self.trades()[2:], [("sell", "KRW-BTC")])
-        self.assertEqual(bot.book.slot("a")["krw"], 0.0)                # 판 돈은 대기 원화로
-        self.assertGreaterEqual(bot.book.data["reserve"], self.db.recent_trades()[0]["krw"] - 1)
-
-    def test_unknown_market_is_rejected(self):
-        self.portfolio(("a", "KRW-BTC", "rsi", 100))
-        bot = self.make_bot()
-        self.btc(self.D1, 100)
-        self.db.set_state("control_request", {"mode": "paper", "slots": [
-            {"market": "KRW-NOPE", "strategy": "rsi", "weight": 50}]})
-        self.go(bot, self.D1)
-        self.assertEqual([s.market for s in bot.slots], ["KRW-BTC"])
-        self.assertIsNone(self.db.get_state("control_request"))
+        self.btc(self.D1, 110)                                           # 일봉 계좌: 목표가 120 대기
+        h1, h2 = "2026-10-21T03:00", "2026-10-21T04:00"
+        eth_prev = candle("2026-10-21T02:00", 90, 120, 80, 100)           # 1시간봉 목표가 120
+        self.market.set("KRW-ETH", h1, 100, eth_prev, 125, tf="60m")
+        self.go(bot, self.D1, hour=h1)                                    # 1시간봉 계좌만 돌파 매수
+        self.assertEqual(self.trades(), [("buy", "KRW-ETH")])
+        self.assertIn("다음 봉 시작", self.db.get_state("status")["slots"][1]["state_text"])
+        self.market.set("KRW-ETH", h2, 130, candle(h1, 100, 130, 100, 126), 130, tf="60m")
+        self.go(bot, self.D1, hour=h2)                                    # 다음 봉 시작 → 매도 (일봉은 그대로)
+        self.assertEqual(self.trades(), [("buy", "KRW-ETH"), ("sell", "KRW-ETH")])
+        self.assertEqual(bot.slots[0].plan_day, self.D1)
+        self.assertEqual(bot.slots[1].plan_day, h2)
 
     # ---- 실거래 ----
 
     def test_rejected_order_is_retried_without_pausing(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 100), mode="live", budget=50_000)
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 50_000), mode="live", vault=950_000)
         self.client.reject = "bid"
         bot = self.make_bot()
         self.btc(self.D1, 125)
@@ -794,17 +832,16 @@ class BotFlowTest(TempDbTest):
         self.assertEqual(self.client.attempts, 2)                       # 멈추지 않고 다시 시도
         self.client.reject = None
         self.go(bot, self.D1)
-        self.assertEqual(self.client.orders[-1]["price"], str(int(50_000 / 1.0005)))
+        self.assertEqual(self.client.orders[-1]["price"], str(int(50_000 / 1.0005)))  # 그 계좌 원화만큼만
         self.assertEqual(self.db.recent_trades()[0]["mode"], "live")
 
     def test_power_loss_after_order_is_reconciled_and_trading_continues(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 100), mode="live", budget=100_000)
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 100_000), mode="live")
         self.client.fail_wait = True                                    # 주문은 들어갔는데 결과를 받기 전에 끊김
         bot = self.make_bot()
         self.btc(self.D1, 125)
         self.go(bot, self.D1, errors_ok=True)
         self.assertEqual(bot.book.slot("a")["coin"], 0)                 # 장부는 아직 모름
-
         self.client.fail_wait = False
         rebooted = self.make_bot()                                      # 전원 복구
         self.go(rebooted, self.D1)
@@ -812,9 +849,10 @@ class BotFlowTest(TempDbTest):
         self.assertGreater(rebooted.book.slot("a")["coin"], 0)
         self.assertIn("재시작 후 확인", self.db.recent_trades()[0]["reason"])
         self.assertIsNone(rebooted.executor.pending())
+        self.assertEqual(len(rebooted.slots), 1)                        # 장부가 맞으니 바이앤홀드 계좌가 안 생긴다
 
     def test_power_loss_before_order_reached_upbit(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 100), mode="live", budget=100_000)
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 100_000), mode="live")
         self.db.set_state(LiveExecutor.PENDING_KEY, {"identifier": "mypie-lost", "side": "bid", "market": "KRW-BTC",
                                                      "slot": "a", "day": self.D1, "at": "2026-10-21 10:00:00"})
         bot = self.make_bot()
@@ -823,42 +861,38 @@ class BotFlowTest(TempDbTest):
         self.assertEqual(self.client.attempts, 1)
         self.assertGreater(bot.book.slot("a")["coin"], 0)
 
-    def test_full_mode_sells_coins_already_in_the_account(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 100), mode="live", budget="all")
-        self.client.krw, self.client.coins = 0.0, {"BTC": 100.0}       # 계좌에 원래 BTC만 있음
+    def test_coins_already_in_the_account_go_to_buy_and_hold_not_the_strategy(self):
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 0), mode="live")
+        self.client.krw, self.client.coins = 0.0, {"BTC": 100.0}        # 계좌에 원래 BTC만 있음
         bot = self.make_bot()
         self.btc(self.D1, 110)
-        self.go(bot, self.D1)                                          # 변동성 돌파: 09시 매도 계획 → 전부 매도
-        self.assertEqual(self.client.coins["BTC"], 0)
-        self.assertEqual(self.trades(), [("sell", "KRW-BTC")])
+        self.go(bot, self.D1)
+        self.assertEqual(self.trades(), [])                             # 변동성 돌파 계좌 것이 아니라서 팔지 않는다
+        hold = next(s for s in bot.slots if s.id != "a")
+        self.assertEqual((hold.name, hold.rule["strategy"], bot.book.slot(hold.id)["coin"]),
+                         ("BTC · 원래 있던 코인", "buy_and_hold", 100.0))
 
-    def test_full_mode_buys_whole_share_and_tops_up_after_deposit(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 100), mode="live", budget="all")
-        self.client.krw = 100_000.0
+    def test_deposit_goes_to_vault_and_is_not_bought(self):
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 100_000), mode="live", vault=100_000)
         bot = self.make_bot()
         self.btc(self.D1, 125)
         self.go(bot, self.D1)
-        self.assertEqual(self.client.orders[0]["price"], str(math.floor(100_000 * 0.995 / 1.0005)))
+        self.assertEqual(self.client.orders[0]["price"], str(math.floor(100_000 / 1.0005)))  # 그 계좌 원화만큼
         self.client.krw += 50_000                                       # 보유 중에 입금
         self.go(bot, self.D1)
-        self.assertEqual(len(self.client.orders), 2)                    # 입금한 돈으로 추가 매수
-        self.assertAlmostEqual(bot.book.data["contributions"], 150_000, delta=1)
+        self.assertEqual(len(self.client.orders), 1)                    # 알아서 사지 않는다 (계좌로 옮겨야 산다)
+        self.assertAlmostEqual(bot.book.vault, 150_000, delta=1)
+        self.assertAlmostEqual(bot.book.data["contributions"], 250_000, delta=1)
 
-    def test_switch_to_full_mode_from_web_request(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 100))
+    def test_whole_account_money_keeps_a_small_margin(self):
+        self.accounts(("a", "KRW-BTC", "volatility_breakout", 100_000), mode="live")
         bot = self.make_bot()
-        self.btc(self.D1, 110)
-        self.db.set_state("control_request", {"mode": "live", "budget": "all", "slots": [
-            {"id": "a", "market": "KRW-BTC", "strategy": "volatility_breakout", "weight": 100}]})
-        with mock.patch("mypie.bot.load_keys", return_value=("a", "b")), \
-             mock.patch("mypie.upbit.UpbitClient", return_value=self.client):
-            self.go(bot, self.D1)
-        self.assertEqual((bot.executor.mode, bot.settings["budget"]), ("live", "all"))
-        self.assertTrue(bot.book.full)
-        self.assertEqual(self.db.get_state("key_info")["expire_at"][:10], "2027-10-21")
+        self.btc(self.D1, 125)
+        self.go(bot, self.D1)                                          # 계좌 원화가 업비트 원화 전부면 0.5% 남기고 산다
+        self.assertEqual(self.client.orders[0]["price"], str(math.floor(100_000 * 0.995 / 1.0005)))
 
     def test_warns_when_public_ip_changes(self):
-        self.portfolio(("a", "KRW-BTC", "rsi", 100), mode="live", budget=100_000)
+        self.accounts(("a", "KRW-BTC", "rsi", 100_000), mode="live")
         bot = self.make_bot()
         self.btc(self.D1, 110)
         self.go(bot, self.D1, ip="1.1.1.1")                            # 업비트가 이 IP를 받아 줌
@@ -866,43 +900,13 @@ class BotFlowTest(TempDbTest):
         bot.last_ip_check = 0
         with mock.patch("mypie.bot.load_keys", return_value=("a", "b")):
             self.go(bot, self.D1, ip="2.2.2.2")
-        self.assertTrue(self.db.get_state("status")["network"]["ip_changed"])
         self.assertTrue(any("IP가 바뀐" in e["message"] for e in self.db.recent_events(10)))
-
-    def test_hourly_slot_plans_every_hour_and_daily_slot_is_untouched(self):
-        self.portfolio(("a", "KRW-BTC", "volatility_breakout", 50), ("h", "KRW-ETH", "volatility_breakout", 50))
-        settings = self.db.get_state("settings")
-        settings["slots"][1]["tf"] = "60m"
-        self.db.set_state("settings", settings)
-        bot = self.make_bot()
-        self.btc(self.D1, 110)                                           # 일봉 줄: 목표가 120 대기
-        h1, h2 = "2026-10-21T03:00", "2026-10-21T04:00"
-        eth_prev = candle("2026-10-21T02:00", 90, 120, 80, 100)           # 1시간봉 목표가 120
-        self.market.set("KRW-ETH", h1, 100, eth_prev, 125, tf="60m")
-        self.go(bot, self.D1, hour=h1)                                    # 1시간봉 줄만 돌파 매수
-        self.assertEqual(self.trades(), [("buy", "KRW-ETH")])
-        self.assertIn("다음 봉 시작", self.db.get_state("status")["slots"][1]["state_text"])
-
-        self.market.set("KRW-ETH", h2, 130, candle(h1, 100, 130, 100, 126), 130, tf="60m")
-        self.go(bot, self.D1, hour=h2)                                    # 다음 봉 시작 → 매도 (일봉은 그대로)
-        self.assertEqual(self.trades(), [("buy", "KRW-ETH"), ("sell", "KRW-ETH")])
-        self.assertEqual(bot.slots[0].plan_day, self.D1)
-        self.assertEqual(bot.slots[1].plan_day, h2)
-
-    def test_timeframe_change_sells_that_row(self):
-        self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100))
-        bot = self.make_bot()
-        self.btc(self.D1, 100)
-        self.go(bot, self.D1)                                             # 일봉 바이앤홀드 매수
-        self.db.set_state("control_request", {"mode": "paper", "slots": [
-            {"id": "a", "market": "KRW-BTC", "strategy": "buy_and_hold", "tf": "240m", "weight": 100}]})
-        self.market.set("KRW-BTC", "2026-10-21T00:00", 100, candle("2026-10-20T20:00", 100, 100, 100, 100), 100, tf="240m")
-        self.go(bot, self.D1, hour="2026-10-21T00:00")
-        self.assertEqual(self.trades()[:2], [("buy", "KRW-BTC"), ("sell", "KRW-BTC")])
-        self.assertEqual(bot.slots[0].tf, "240m")
+        # 실거래는 루프마다 업비트 잔고를 확인해서, 업비트가 새 IP도 받아 주면 경고 표시는 바로 사라진다
+        self.assertEqual(self.db.get_state("network")["upbit_ok_ip"], "2.2.2.2")
+        self.assertFalse(self.db.get_state("status")["network"]["ip_changed"])
 
     def test_live_without_keys_falls_back_to_paper(self):
-        self.portfolio(("a", "KRW-BTC", "rsi", 100), mode="live", budget=100_000)
+        self.accounts(("a", "KRW-BTC", "rsi", 100_000), mode="live")
         with mock.patch("mypie.bot.load_keys", return_value=None):
             bot = Bot(self.cfg, self.db)
         self.assertEqual(bot.executor.mode, "paper")
@@ -913,9 +917,7 @@ class WebTest(TempDbTest):
         super().setUp()
         self.db.set_state(pin.STATE_KEY, pin.make("2468"))
         web._pin_failures.clear()
-        self.request = {"mode": "paper", "budget": 100_000,
-                        "slots": [{"market": "KRW-BTC", "strategy": "rsi", "weight": 60},
-                                  {"market": "KRW-ETH", "strategy": "turtle", "weight": 40}]}
+        self.request = {"action": "add", "market": "KRW-BTC", "strategy": "rsi", "tf": "240m", "amount": 100_000}
 
     def tearDown(self):
         web._pin_failures.clear()
@@ -927,39 +929,33 @@ class WebTest(TempDbTest):
         self.assertFalse(pin.verify("1358", stored))
 
     def test_control_needs_right_pin(self):
-        self.assertEqual(web.request_control(self.path, {**self.request, "pin": "0000"}, 1_000_000)[0], 403)
-        self.assertEqual(web.request_control(self.path, {**self.request, "pin": "2468"}, 1_000_000)[0], 200)
-        self.assertEqual(len(self.db.get_state("control_request")["slots"]), 2)
+        self.assertEqual(web.request_coin(self.path, {**self.request, "pin": "0000"})[0], 403)
+        self.assertEqual(web.request_coin(self.path, {**self.request, "pin": "2468"})[0], 200)
+        queued = self.db.states("request:")[0][1]
+        self.assertEqual((queued["action"], queued["market"], queued["tf"], queued["amount"]), ("add", "KRW-BTC", "240m", 100_000))
 
     def test_locks_after_too_many_failures(self):
         for _ in range(web.MAX_PIN_FAILURES):
-            web.request_control(self.path, {**self.request, "pin": "0000"}, 1_000_000)
-        self.assertEqual(web.request_control(self.path, {**self.request, "pin": "2468"}, 1_000_000)[0], 429)
+            web.request_coin(self.path, {**self.request, "pin": "0000"})
+        self.assertEqual(web.request_coin(self.path, {**self.request, "pin": "2468"})[0], 429)
 
-    def test_live_needs_keys_confirmation_and_sane_budget(self):
-        live = {**self.request, "mode": "live", "pin": "2468"}
+    def test_live_needs_keys_and_confirmation(self):
+        live = {"action": "mode", "mode": "live", "pin": "2468"}
         with mock.patch("mypie.web.load_keys", return_value=None):
-            self.assertEqual(web.request_control(self.path, {**live, "confirm_live": True}, 1_000_000)[0], 400)
+            self.assertEqual(web.request_coin(self.path, {**live, "confirm_live": True})[0], 400)
         with mock.patch("mypie.web.load_keys", return_value=("a", "b")):
-            self.assertEqual(web.request_control(self.path, live, 1_000_000)[0], 400)
-            self.assertEqual(web.request_control(self.path, {**live, "budget": 5_000_000, "confirm_live": True},
-                                                 1_000_000)[0], 400)
-            self.assertEqual(web.request_control(self.path, {**live, "budget": "all", "confirm_live": True},
-                                                 1_000_000)[0], 200)
-            self.assertEqual(self.db.get_state("control_request")["budget"], "all")
+            self.assertEqual(web.request_coin(self.path, live)[0], 400)           # '실제 돈' 체크 없이
+            self.assertEqual(web.request_coin(self.path, {**live, "confirm_live": True})[0], 200)
 
-            # 이미 실거래 중이면 종목·비중만 바꿀 때는 다시 체크하지 않는다
-            self.db.set_state("status", {"settings": {"mode": "live", "budget": 100_000}})
-            self.assertEqual(web.request_control(self.path, {**live, "budget": 100_000}, 1_000_000)[0], 200)
-            self.assertEqual(web.request_control(self.path, {**live, "budget": "all"}, 1_000_000)[0], 400)  # 계좌 전액으로 넓힐 땐 체크
-            self.db.set_state("status", {"settings": {"mode": "live", "budget": "all"}})
-            self.assertEqual(web.request_control(self.path, {**live, "budget": "all"}, 1_000_000)[0], 200)
-
-    def test_rejects_bad_portfolio(self):
-        over = {**self.request, "pin": "2468", "slots": [{"market": "KRW-BTC", "strategy": "rsi", "weight": 90},
-                                                         {"market": "KRW-ETH", "strategy": "rsi", "weight": 20}]}
-        self.assertEqual(web.request_control(self.path, over, 1e6)[0], 400)
-        self.assertEqual(web.request_control(self.path, {**self.request, "slots": [], "pin": "2468"}, 1e6)[0], 400)
+    def test_rejects_bad_requests(self):
+        ok = {**self.request, "pin": "2468"}
+        self.assertEqual(web.request_coin(self.path, {**ok, "action": "nope"})[0], 400)
+        self.assertEqual(web.request_coin(self.path, {**ok, "market": "BTC"})[0], 400)
+        self.assertEqual(web.request_coin(self.path, {**ok, "tf": "7m"})[0], 400)
+        self.assertEqual(web.request_coin(self.path, {**ok, "stop_loss": 0.2})[0], 400)
+        self.assertEqual(web.request_coin(self.path, {**ok, "sell": ["nope"]})[0], 400)
+        self.assertEqual(web.request_coin(self.path, {"action": "transfer", "slot": "a", "amount": 0, "pin": "2468"})[0], 400)
+        self.assertEqual(self.db.states("request:"), [])
 
     def test_ranking_request(self):
         self.assertEqual(web.request_ranking(self.path, "KRW-SOL")[0], 200)
@@ -1153,8 +1149,8 @@ class TelegramSetupTest(TempDbTest):
 
 class ReportTest(TempDbTest):
     STATUS = {"mode": "paper", "updated_at": "2026-10-21 09:00:05",
-              "account": {"equity": 1_012_345, "return_pct": 1.23, "contributions": 1_000_000, "reserve": 0},
-              "slots": [{"market": "KRW-BTC", "tf_label": "일봉", "weight": 100, "holding": True, "price": 110_000_000,
+              "account": {"equity": 1_012_345, "return_pct": 1.23, "contributions": 1_000_000, "vault": 0},
+              "slots": [{"market": "KRW-BTC", "tf_label": "일봉", "book": {"krw": 0}, "holding": True, "price": 110_000_000,
                          "return_pct": 1.2, "state_text": "내일 09시에 매도 예정",
                          "strategy": {"label": "변동성 돌파"}}]}
 
@@ -1186,7 +1182,7 @@ class ReportTest(TempDbTest):
 
     def test_morning_report_once_per_day(self):
         cfg = {section: dict(values) for section, values in DEFAULTS.items()}
-        bot = Bot(cfg, self.db, lambda mode, budget: PaperExecutor(0.0005))
+        bot = Bot(cfg, self.db, lambda mode: PaperExecutor(0.0005))
         sent = []
         bot.notifier = sent.append
         self.add_trades()

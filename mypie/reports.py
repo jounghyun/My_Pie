@@ -48,11 +48,12 @@ def status_text(status: dict | None) -> str:
     mode = "실거래" if status["mode"] == "live" else "모의투자"
     ret = f"{a['return_pct']:+.2f}%" if a.get("return_pct") is not None else "-"
     lines = [f"💰 총 자산 {a['equity']:,.0f}원 ({ret}) · {mode}",
-             f"넣은 돈 {a['contributions']:,.0f}원 · 대기 원화 {a['reserve']:,.0f}원"]
+             f"넣은 돈 {a['contributions']:,.0f}원 · 금고 {a.get('vault', a.get('reserve', 0)):,.0f}원"]
     for s in status["slots"]:
         held = "🟢 보유" if s["holding"] else "⏳ 대기"
-        slot_ret = f" · 줄 수익률 {s['return_pct']:+.2f}%" if s.get("return_pct") is not None else ""
-        lines.append(f"\n• {_sym(s['market'])} {s.get('tf_label', '일봉')} · {s['strategy']['label']} · {s['weight']:g}%")
+        slot_ret = f" · 계좌 수익률 {s['return_pct']:+.2f}%" if s.get("return_pct") is not None else ""
+        lines.append(f"\n• {s.get('name') or _sym(s['market'])} {s.get('tf_label', '일봉')} · {s['strategy']['label']}"
+                     f" · 원화 {s['book']['krw']:,.0f}원")
         lines.append(f"  {held} · 현재가 {_price(s['price'])}원{slot_ret}")
         lines.append(f"  {s['state_text']}")
     lines.append(f"\n({status['updated_at'][5:16]} 기준)")

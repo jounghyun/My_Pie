@@ -31,7 +31,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import auth, backtest, krx, pin, stoploss, telegram, timeframes, toss, upbit
-from .bot import validate_slots
 from .stockbot import REGULAR_TF, regular_ready
 from .broker import MIN_ORDER_KRW
 from .config import load_config
@@ -62,12 +61,12 @@ def _open(db_path: str) -> Database | None:
     return Database(db_path, create=False) if Path(db_path).exists() else None
 
 
-def build_payload(db_path: str, max_budget: float) -> dict:
+def build_payload(db_path: str) -> dict:
     payload = {
         "server_time": ts(), "status": None, "trades": [], "events": [], "equity": [],
         "rankings": {}, "markets": [], "market_info": None, "key_info": None, "ranking_request": None,
         "pin_set": False, "pending": None, "live_ready": load_keys() is not None,
-        "limits": {"min_budget": MIN_ORDER_KRW, "max_budget": max_budget},
+        "min_order": MIN_ORDER_KRW, "results": [],
         "strategies": [{"name": c.name, "label": c.label, "description": c.description, "guide": c.guide}
                        for c in STRATEGIES.values()],
         "timeframes": [{"id": k, "label": v["label"], "short": v["short"], "minutes": v["minutes"],
@@ -91,7 +90,8 @@ def build_payload(db_path: str, max_budget: float) -> dict:
         payload["market_info"] = db.get_state("market_info")
         payload["key_info"] = db.get_state("key_info")
         payload["pin_set"] = db.get_state(pin.STATE_KEY) is not None
-        payload["pending"] = db.get_state("control_request")
+        payload["results"] = db.get_state("request_results") or []
+        payload["pending"] = len(db.states("request:"))  # 아직 봇이 처리하지 않은 요청 수
         payload["telegram"] = telegram_status(db)
     finally:
         db.close()
@@ -747,43 +747,74 @@ def _check_pin(db: Database, pin_input: str) -> tuple[int, str] | None:
     return None
 
 
-def request_control(db_path: str, data: dict, max_budget: float) -> tuple[int, str]:
-    """포트폴리오·계좌·한도 변경 요청. (HTTP 상태 코드, 안내 문구)를 돌려준다."""
-    slots, problem = validate_slots(data.get("slots"))
-    if problem:
-        return 400, problem + "."
-    mode = str(data.get("mode", ""))
-    budget_all = data.get("budget") == "all"  # 실거래: 업비트 계좌 전액
+COIN_ACTIONS = ("add", "remove", "close", "cancel_close", "strategy", "transfer", "mode", "paper_cash")
+
+
+def request_coin(db_path: str, data: dict) -> tuple[int, dict]:
+    """코인 봇에게 보내는 요청 (코인 계좌 만들기·지우기·팔고 지우기·전략 변경·금고 이체·계좌 전환·가상 입출금).
+    PIN이 필요하다. 주식 봇의 request_stock과 같은 모양."""
+    action = str(data.get("action", ""))
+    if action not in COIN_ACTIONS:
+        return 400, {"ok": False, "message": "알 수 없는 요청이에요."}
+    request: dict = {"action": action}
     try:
-        budget = 0.0 if budget_all else float(data.get("budget") or 0)
+        if action in ("add", "strategy"):  # 살 때·팔 때 전략, 판단 주기, 손절선
+            rule, problem = check_rule(data, STRATEGIES)
+            if problem:
+                return 400, {"ok": False, "message": "전략을 골라 주세요."}
+            tf = str(data.get("tf") or "1d")
+            if tf not in timeframes.TIMEFRAMES:
+                return 400, {"ok": False, "message": "판단 주기를 골라 주세요."}
+            stop, problem = stoploss.parse(data.get("stop_loss"))
+            if problem:
+                return 400, {"ok": False, "message": problem}
+            request.update(rule_fields(rule), tf=tf, stop_loss=stop)
+        if action == "add":
+            market = str(data.get("market", ""))
+            if not MARKET_PATTERN.match(market):
+                return 400, {"ok": False, "message": "종목을 골라 주세요."}
+            request.update(market=market, name=str(data.get("name") or "")[:40],
+                           amount=max(0.0, float(data.get("amount") or 0)))
+        elif action in ("remove", "close", "cancel_close", "strategy", "transfer"):
+            request["slot"] = str(data.get("slot", ""))[:20]
+            if action == "transfer":
+                direction = "out" if data.get("direction") == "out" else "in"
+                request.update(direction=direction, all=bool(data.get("all")))
+                if not request["all"]:
+                    amount = float(data.get("amount") or 0)
+                    if not 0 < amount <= 1e11:
+                        return 400, {"ok": False, "message": "옮길 금액을 넣어 주세요."}
+                    request["amount"] = amount
+        elif action == "mode":
+            mode = str(data.get("mode", ""))
+            if mode not in ("paper", "live"):
+                return 400, {"ok": False, "message": "계좌를 다시 골라 주세요."}
+            if mode == "live":
+                if load_keys() is None:
+                    return 400, {"ok": False, "message": "업비트 API 키가 아직 없어요. 파이에서 python3 -m mypie.keys 로 먼저 등록하세요."}
+                if data.get("confirm_live") is not True:
+                    return 400, {"ok": False, "message": "실거래는 '실제 돈으로 거래한다'에 체크해야 바꿀 수 있어요."}
+            request["mode"] = mode
+        elif action == "paper_cash":
+            amount = float(data.get("amount") or 0)
+            if not amount or abs(amount) > 1e11:
+                return 400, {"ok": False, "message": "금액을 넣어 주세요."}
+            request["amount"] = amount
     except (TypeError, ValueError):
-        return 400, "투자 한도를 숫자로 입력해 주세요."
-    if mode not in ("paper", "live"):
-        return 400, "계좌를 다시 골라 주세요."
-    if mode == "live":
-        if not budget_all and not (MIN_ORDER_KRW <= budget <= max_budget):
-            return 400, f"투자 한도는 {MIN_ORDER_KRW:,}원 ~ {max_budget:,.0f}원 사이로 정해 주세요."
-        if load_keys() is None:
-            return 400, "업비트 API 키가 아직 없어요. 파이에서 python3 -m mypie.keys 로 먼저 등록하세요."
-    if not Path(db_path).exists():
-        return 503, "봇이 아직 시작되지 않았어요."
-    request = {"slots": slots, "mode": mode, "budget": "all" if budget_all else budget, "requested_at": ts()}
-    with _pin_lock:  # 한 번에 하나씩만 확인해서 무작위 대입을 느리게 만든다
-        db = Database(db_path, create=False)
-        try:
-            # '실제 돈' 체크는 실거래로 넘어갈 때와 계좌 전액으로 바꿀 때만 받는다 (이미 실거래 중인 종목·비중 변경은 X)
-            current = (db.get_state("status") or {}).get("settings") or {}
-            if (mode == "live" and data.get("confirm_live") is not True
-                    and (current.get("mode") != "live" or (budget_all and current.get("budget") != "all"))):
-                return 400, "실거래는 '실제 돈으로 거래한다'에 체크해야 바꿀 수 있어요."
-            failure = _check_pin(db, str(data.get("pin", "")))
-            if failure:
-                return failure
-            db.set_state("control_request", request)
-        finally:
-            db.close()
-    log.info("설정 변경 요청: %s", request)
-    return 200, "봇에게 전했어요. 10초 안에 적용돼요."
+        return 400, {"ok": False, "message": "숫자를 다시 확인해 주세요."}
+    failure = _pin_ok(db_path, str(data.get("pin", "")))
+    if failure:
+        return failure[0], {"ok": False, "message": failure[1]}
+    db = _open(db_path)
+    if not db:
+        return 503, {"ok": False, "message": "봇이 아직 시작되지 않았어요."}
+    try:
+        request["id"] = str(time.time_ns())
+        db.set_state(f"request:{request['id']}", request)
+    finally:
+        db.close()
+    log.info("코인 요청: %s", request)
+    return 200, {"ok": True, "message": "봇에게 전했어요. 곧 처리돼요.", "id": request["id"]}
 
 
 def request_ranking(db_path: str, market: str, tf: str = "1d") -> tuple[int, str]:
@@ -991,7 +1022,6 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "MyPie"
     db_path = ""
     stock_db_path = ""
-    max_budget = 1_000_000.0
     login_enabled = True
     code_digits = 2
     session_hours = 24
@@ -1047,7 +1077,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
             return
         builders = {
-            "/api/status": lambda: build_payload(self.db_path, self.max_budget),
+            "/api/status": lambda: build_payload(self.db_path),
             "/api/candles": lambda: (
                 build_coin_chart(self.db_path, query.get("market", ["KRW-BTC"])[0], query["span"][0])
                 if "span" in query else
@@ -1105,8 +1135,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError
             if route == "/api/control":
-                code, message = request_control(self.db_path, data, self.max_budget)
-                body = {"ok": code == 200, "message": message}
+                code, body = request_coin(self.db_path, data)
             elif route == "/api/ranking":
                 code, message = request_ranking(self.db_path, str(data.get("market", "")), str(data.get("tf") or "1d"))
                 body = {"ok": code == 200, "message": message}
@@ -1162,7 +1191,6 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config()
     Handler.db_path = cfg["general"]["db_path"]
-    Handler.max_budget = float(cfg["live"]["max_budget"])
     Handler.login_enabled = bool(cfg["web"]["login"])
     Handler.code_digits = max(2, min(int(cfg["web"]["code_digits"]), 8))
     Handler.session_hours = float(cfg["web"]["session_hours"])

@@ -8,19 +8,9 @@
 <link rel="stylesheet" href="/app.css">
 <style>
   /* 주식 화면에만 있는 것 */
-  .vault-big { font-size: clamp(22px, 4.5vw, 30px); font-weight: 800; letter-spacing: -0.02em; margin: 4px 0 2px; }
   .mini-rows { display: grid; gap: 4px; margin-top: 10px; font-size: 13px; }
   .mini-rows div { display: flex; justify-content: space-between; gap: 8px; }
   .mini-rows span:first-child { color: var(--muted); }
-  .slot-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-  .slot-actions button { min-height: 32px; padding: 4px 10px; font-size: 12.5px; }
-  .panel { margin-top: 10px; padding: 10px; border-radius: 12px; background: var(--soft); display: grid; gap: 8px; }
-  .panel .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .panel input[type=number] { width: 140px; }
-  .panel .hint { flex-basis: 100%; }
-  .add-card { border: 2px dashed var(--line); background: transparent; box-shadow: none; display: grid; place-items: center;
-              min-height: 140px; cursor: pointer; color: var(--muted); font-weight: 650; }
-  .add-card:hover { border-color: var(--brand); color: var(--brand); }
   .search { position: relative; }
   .search input { width: 100%; font: inherit; border-radius: 10px; border: 1px solid var(--line); padding: 9px 12px; min-height: 42px;
                   background: var(--card); color: var(--text); }
@@ -31,12 +21,6 @@
   .suggest button:hover, .suggest button:focus { background: var(--soft); }
   .suggest small { color: var(--muted); }
   .picked { font-weight: 700; }
-  .addgrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr); gap: 10px; }
-  .addgrid .addrule { grid-column: 1 / -1; display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
-  .addgrid .addrule select, .panel .rule select { color: var(--text); }
-  @media (max-width: 760px) { .addgrid { grid-template-columns: 1fr; } }
-  .addgrid label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
-  .addgrid select, .addgrid input[type=number] { width: 100%; min-width: 0; color: var(--text); }
   .setup { display: grid; gap: 6px; }
   .tagline { font-size: 11px; font-weight: 700; color: var(--brand); background: var(--brand-soft); border-radius: 6px; padding: 0 6px; margin-left: 6px; }
   .simbar { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .7fr); gap: 8px; }

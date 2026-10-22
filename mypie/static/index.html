@@ -21,7 +21,7 @@
         <button type="button" id="logout" class="ghost small" hidden>로그아웃</button>
       </div>
       <nav class="jump">
-        <a href="#overview">개요</a><a href="#portfolio">포트폴리오</a><a href="#chart">차트</a><a href="#settings">설정</a><a href="#telegram">텔레그램</a>
+        <a href="#overview">개요</a><a href="#accounts">코인 계좌</a><a href="#chart">차트</a><a href="#settings">설정</a><a href="#telegram">텔레그램</a>
         <a href="#ranking">전략 순위</a><a href="#calendar">손익 캘린더</a><a href="#market">시장</a><a href="#history">기록</a><a href="#system">라즈베리파이</a>
       </nav>
     </div>
@@ -70,12 +70,38 @@
   <div class="kpis">
     <div class="card"><div class="label">실현 손익</div><div class="value num" id="realized">-</div><div class="sub" id="realizedSub">-</div></div>
     <div class="card"><div class="label">승률</div><div class="value num" id="winrate">-</div><div class="sub" id="winrateSub">-</div></div>
-    <div class="card"><div class="label">대기 원화</div><div class="value num" id="reserve">-</div><div class="sub" id="reserveSub">비중에 안 들어간 돈</div></div>
+    <div class="card"><div class="label">🏦 금고 (쉬는 돈)</div><div class="value num" id="vault">-</div><div class="sub" id="vaultSub">입금하면 금고로 들어와요</div>
+      <div class="slot-actions" id="vaultActions" hidden>
+        <button type="button" id="paperIn">＋ 가상 입금</button><button type="button" id="paperOut" class="ghost">가상 출금</button>
+      </div>
+      <div id="vaultPanel"></div>
+    </div>
     <div class="card"><div class="label">최대 낙폭</div><div class="value num" id="mdd">-</div><div class="sub" id="mddSub">자산 고점 대비</div></div>
   </div>
 
-  <!-- 포트폴리오 -->
-  <div class="slots" id="portfolio"></div>
+  <!-- 코인 계좌 -->
+  <section id="accounts" style="margin-top:14px">
+    <h2 style="margin:0 0 10px"><span class="ico">📦</span>코인 계좌 <small class="muted" style="font-weight:400;font-size:12.5px">코인 하나 + 전략 · 자기 원화로만 사고, 팔면 원화가 계좌에 남아요</small></h2>
+    <div class="slots" id="portfolio"></div>
+  </section>
+
+  <!-- 코인 계좌 만들기 -->
+  <section class="card" id="addBox" hidden>
+    <h2><span class="ico">➕</span>코인 계좌 만들기 <small>같은 코인도 다른 전략으로 여러 개 만들 수 있어요 · 실거래면 원래 있던 코인은 그 코인의 바이앤홀드 계좌로 모아요</small>
+      <button type="button" class="ghost small right" id="addClose">닫기</button></h2>
+    <div class="addgrid three">
+      <label>종목<select id="addMarket"></select></label>
+      <label>판단 주기<select id="addTf"></select></label>
+      <label>금고에서 넣을 돈 (원)<input type="number" id="addAmount" min="0" step="10000" placeholder="0" inputmode="numeric"></label>
+      <div class="addrule">전략 <span id="addRankNote"></span><div id="addRule"></div></div>
+      <div class="addrule" id="addStop"></div>
+    </div>
+    <p class="guide-now" id="addGuide" hidden></p>
+    <div class="actions">
+      <input id="addPin" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off" maxlength="32" aria-label="PIN">
+      <button type="button" class="primary" id="addGo">코인 계좌 만들기</button>
+    </div>
+  </section>
 
   <!-- 차트 -->
   <section class="card" id="chart">
@@ -92,19 +118,8 @@
 
   <!-- 설정 -->
   <section class="card" id="settings">
-    <h2><span class="ico">⚙️</span>포트폴리오 설정 <small>종목 + 전략 + 비중(%) · 줄마다 따로 사고팔아요</small></h2>
-    <div class="editor" id="editor"></div>
-    <div class="tools">
-      <button type="button" id="addRow">＋ 종목 추가</button>
-      <button type="button" id="equalize">⚖️ 균등 배분</button>
-    </div>
-    <div class="sum">
-      <div class="sum-bar" id="sumBar"></div>
-      <div class="sum-text"><span id="sumText"></span><span class="muted" id="sumHint"></span></div>
-    </div>
-    <p class="guide-now" id="pickGuide" hidden></p>
-
-    <div class="form" style="margin-top:16px">
+    <h2><span class="ico">⚙️</span>계좌 설정 <small>모의투자와 실거래는 금고·코인 계좌를 따로 써요 · 바꿔도 아무것도 팔지 않아요</small></h2>
+    <div class="form">
       <div class="field-label">계좌</div>
       <div class="field">
         <div class="seg big" role="group" aria-label="계좌">
@@ -113,21 +128,14 @@
         </div>
         <span class="hint" id="keyState"></span>
       </div>
-      <div class="field-label" id="budgetLabel">투자 한도</div>
-      <div class="field" id="budgetField">
-        <input id="budget" type="number" min="5000" step="10000" inputmode="numeric" aria-label="투자 한도">
-        <span class="hint">원</span>
-        <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="budgetAll"> 업비트 계좌 전액</label>
-        <span class="hint" style="flex-basis:100%" id="budgetHint"></span>
-      </div>
     </div>
+    <p class="hint" style="margin:8px 0 0">실거래는 업비트 계좌 전체를 써요. 원화는 금고로 들어오고, 코인 계좌로 옮긴 만큼만 사고팔아요. 봇이 모르는 코인은 그 코인의 바이앤홀드 계좌로 모아요.</p>
     <label class="check" id="confirmRow" hidden style="margin-top:10px">
       <input type="checkbox" id="confirmLive"> 실제 돈으로 주문이 나간다는 걸 이해했어요
     </label>
     <div class="actions">
-      <input id="pin" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off" maxlength="32" aria-label="PIN">
-      <button class="primary" id="apply" type="button">설정 적용</button>
-      <button id="reset" type="button">되돌리기</button>
+      <input id="modePin" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off" maxlength="32" aria-label="PIN">
+      <button class="primary" id="modeGo" type="button" disabled>계좌 바꾸기</button>
     </div>
     <p class="msg" id="msg"></p>
   </section>
@@ -177,7 +185,7 @@
     <div class="simtiles" id="simTiles"></div>
     <div class="chart-box" id="simBox"></div>
     <div class="legend" id="simLegend"></div>
-    <div class="tools"><button type="button" id="simUse">➕ 이 조합을 포트폴리오 설정에 넣기</button></div>
+    <div class="tools"><button type="button" id="simUse">➕ 이 조합으로 코인 계좌 만들기</button></div>
     <h3 class="subhead" id="rankPeriod">같은 기간 전략 순위</h3>
     <div class="scroll">
       <table>
@@ -223,7 +231,7 @@
 
   <div class="row2">
     <section class="card" id="market">
-      <h2><span class="ico">🔥</span>오늘의 시장 <small>거래대금 상위 30개 · 누르면 포트폴리오에 추가</small></h2>
+      <h2><span class="ico">🔥</span>오늘의 시장 <small>거래대금 상위 30개 · 누르면 코인 계좌 만들기</small></h2>
       <div class="movers">
         <div><h3>🚀 급등 TOP 5</h3><div id="gainers"></div></div>
         <div><h3>🧊 급락 TOP 5</h3><div id="losers"></div></div>
@@ -324,7 +332,7 @@ function tradingDay(tsStr) {  // 매매 시각 → 거래일 (09시 전이면 �
 const sym = (m) => m.replace('KRW-', '');
 
 const S = { data: null, candles: null, stats: null, system: null, span: '3m', offset: 0, sel: null,
-            rows: [], editSig: '', dirty: false, mode: 'paper', userMsg: false, focusRow: null,
+            open: {}, mine: {}, pin: null,  // 열어 둔 계좌 버튼 칸, 내가 보낸 요청, 이 창에서 넣은 PIN
             requested: {}, seenTrades: null, seenEvents: null, guidesTf: null, sim: null, simSel: null };
 
 function marketName(m) {
@@ -390,7 +398,7 @@ function renderAll() {
   renderMovers(d);
   renderAlerts(d);
   renderTelegram(d);
-  if (!s) { setBeat('bad', '봇이 아직 시작되지 않았어요'); renderEditorIfNeeded(); return; }
+  if (!s) { setBeat('bad', '봇이 아직 시작되지 않았어요'); return; }
   if (!S.sel || !s.slots.some(x => x.rank_key === S.sel)) {
     const prev = S.sel; S.sel = s.slots.length ? s.slots[0].rank_key : null;
     if (prev !== S.sel) refreshCandles();
@@ -401,9 +409,9 @@ function renderAll() {
   setBeat(alive ? 'ok' : 'bad', (alive ? '정상 작동 · ' : '봇 응답 없음 · ') + ago(age));
 
   const live = s.mode === 'live';
-  $('modeChip').textContent = live ? (s.budget === 'all' ? '🔴 실거래 · 계좌 전액' : `🔴 실거래 · 한도 ${compact(s.budget)}원`) : '🧪 모의투자';
+  $('modeChip').textContent = live ? '🔴 실거래' : '🧪 모의투자';
   $('modeChip').className = 'chip ' + (live ? 'live' : 'paper');
-  $('slotsChip').textContent = `📦 ${s.slots.map(x => sym(x.market)).join(' · ')}`;
+  $('slotsChip').textContent = s.slots.length ? `📦 ${[...new Set(s.slots.map(x => sym(x.market)))].join(' · ')}` : '📦 계좌 없음';
 
   // 총 자산
   const a = s.account;
@@ -412,9 +420,14 @@ function renderAll() {
   $('retBadge').className = 'badge ' + (a.return_pct > 0 ? 'up' : a.return_pct < 0 ? 'down' : '');
   tone($('retBadge'), a.return_pct);
   $('pnl').textContent = signedWon(a.equity - a.contributions); tone($('pnl'), a.equity - a.contributions);
-  $('totalSub').textContent = `넣은 돈 ${won(a.contributions)}` + (s.full ? ' (입출금 반영)' : '');
-  $('reserve').textContent = won(a.reserve);
-  $('reserveSub').textContent = a.equity > 0 ? `전체의 ${(a.reserve / a.equity * 100).toFixed(1)}% · 비중 밖 돈` : '비중에 안 들어간 돈';
+  $('totalSub').textContent = `넣은 돈 ${won(a.contributions)}` + (live ? ' (입출금 반영)' : '');
+  $('vault').textContent = won(a.vault);
+  $('vaultSub').textContent = live ? '업비트에 입금하면 여기로 들어와요 · 계좌로 옮겨야 사고팔아요'
+                                   : '모의투자: 가상 입금·출금으로 금고를 채워요';
+  $('vaultActions').hidden = live;
+  renderSettings(d);
+  renderResults(d.results);
+  if (S.add && !$('addBox').hidden && addSig() !== S.addSig) renderAdd();  // 순위 계산이 끝나면 고르는 칸도 새로
   renderDonut(s);
   renderSlots(s);
   renderSelected(s);
@@ -422,7 +435,6 @@ function renderAll() {
 
   document.title = `${won(a.equity)} · My_Pie`;
   $('chartTitle').textContent = `${live ? '실거래' : '모의투자'} · 최근 7일 · 5분 간격`;
-  renderEditorIfNeeded();
   simTick();
   renderCompare();
   renderTrades(d.trades);
@@ -436,8 +448,8 @@ function setBeat(kind, text) { $('dot').className = 'dot ' + kind; $('beat').tex
 
 function renderDonut(s) {
   const root = $('donut'); root.innerHTML = '';
-  const parts = s.slots.map((x, i) => ({ label: sym(x.market), v: Math.max(0, x.equity), color: slotColor(i) }));
-  parts.push({ label: '대기 원화', v: Math.max(0, s.account.reserve), color: 'var(--c5)' });
+  const parts = s.slots.map((x, i) => ({ label: x.name, v: Math.max(0, x.equity), color: slotColor(i) }));
+  parts.push({ label: '🏦 금고', v: Math.max(0, s.account.vault), color: 'var(--c5)' });
   const total = parts.reduce((t, p) => t + p.v, 0) || 1;
   let start = -Math.PI / 2;
   const R = 52, r = 34, cx = 60, cy = 60;
@@ -450,11 +462,10 @@ function renderDonut(s) {
     start += ang;
   }
   const t = svg('text', { x: 60, y: 57, 'text-anchor': 'middle', 'font-size': 11, fill: 'var(--muted)' }); t.textContent = '실제 비중';
-  const t2 = svg('text', { x: 60, y: 73, 'text-anchor': 'middle', 'font-size': 14, 'font-weight': 800, fill: 'var(--text)' }); t2.textContent = s.slots.length + '종목';
+  const t2 = svg('text', { x: 60, y: 73, 'text-anchor': 'middle', 'font-size': 14, 'font-weight': 800, fill: 'var(--text)' }); t2.textContent = s.slots.length + '계좌';
   root.append(t, t2);
   const lg = $('donutLegend'); lg.innerHTML = '';
-  parts.forEach((p, i) => lg.append(el('span', {}, el('i', { style: `background:${p.color}` }), `${p.label} ${(p.v / total * 100).toFixed(1)}%` +
-    (i < s.slots.length ? ` (목표 ${s.slots[i].weight}%)` : ''))));
+  parts.forEach((p) => lg.append(el('span', {}, el('i', { style: `background:${p.color}` }), `${p.label} ${(p.v / total * 100).toFixed(1)}%`)));
 }
 
 function holdLine(text, n) {  // 카드의 수익률·손익 아래 '(바이앤홀드 …)' 한 줄
@@ -475,15 +486,18 @@ function planLine(x) {
 }
 
 function renderSlots(s) {
-  const box = $('portfolio'); box.innerHTML = '';
+  const box = $('portfolio');
+  const focused = document.activeElement && box.contains(document.activeElement) && ['INPUT', 'SELECT'].includes(document.activeElement.tagName);
+  if (focused) return;  // 입력 중이면 다시 그리지 않는다 (글자가 날아가지 않게)
+  box.innerHTML = '';
   const byMarket = (S.stats && S.stats.by_market) || {};
   s.slots.forEach((x, i) => {
     const t = ticker(x.market), rate = t ? (x.price / t.prev_close - 1) * 100 : null;
     const card = el('div', { class: 'card slot-card' + (x.rank_key === S.sel ? ' sel' : ''), title: '눌러서 이 종목의 차트·순위 보기' });
     card.append(el('div', { class: 'bar', style: `background:${slotColor(i)}` }));
+    const chip = x.closing ? '🧹 팔고 지우는 중' : x.holding ? '🟢 보유' : x.book.krw >= (S.data.min_order || 5000) ? '⏳ 대기' : '👀 지켜보기';
     const head = el('div', { class: 'slot-head' },
-      el('div', { class: 'slot-name' }, marketName(x.market), el('small', { text: sym(x.market) })),
-      el('span', { class: 'chip', text: x.weight > 0 ? `목표 ${x.weight}%` : '👀 0% · 지켜보기' }));
+      el('div', { class: 'slot-name' }, x.name, el('small', { text: sym(x.market) })), el('span', { class: 'chip', text: chip }));
     const nextMs = parseTs(x.next_at).getTime() - (Date.now() + S.offset);
     const when = el('div', { class: 'slot-when' }, el('span', { class: 'chip', text: `⏱ ${x.tf_label}` }),
       ` 다음 판단 ${x.tf === '1d' ? '09:00' : x.next_at.slice(11, 16)} · `, el('span', { 'data-next': x.next_at, text: leftText(nextMs) }));
@@ -497,18 +511,29 @@ function renderSlots(s) {
     const ret = el('div', { class: 'v num', text: pct(x.return_pct) }); tone(ret, x.return_pct);
     const right = x.holding
       ? (() => { const v = el('div', { class: 'v num', text: `${signedWon(x.unrealized)}` }); tone(v, x.unrealized); return el('div', { class: 'tile' }, el('div', { class: 'label', text: `평가 손익 ${pct(x.unrealized_pct, 1)}` }), v); })()
-      : el('div', { class: 'tile' }, el('div', { class: 'label', text: '원화 몫' }), el('div', { class: 'v num', text: won(x.book.krw) }));
-    const retTile = el('div', { class: 'tile' }, el('div', { class: 'label', text: m ? `줄 수익률 · ${m.wins}승 ${m.round_trips - m.wins}패` : '줄 수익률' }), ret);
+      : el('div', { class: 'tile' }, el('div', { class: 'label', text: '계좌 원화' }), el('div', { class: 'v num', text: won(x.book.krw) }));
+    const retTile = el('div', { class: 'tile' }, el('div', { class: 'label', text: m ? `계좌 수익률 · ${m.wins}승 ${m.round_trips - m.wins}패` : '계좌 수익률' }), ret);
     // 같은 돈을 같은 때 넣고 그냥 들고 있었다면 (바이앤홀드)
     retTile.append(holdLine(x.hold_return_pct == null ? null : `(${pct(x.hold_return_pct)})`, x.hold_return_pct));
     right.append(holdLine(x.hold_pnl == null ? null : `(${signedWon(x.hold_pnl)})`, x.hold_pnl));
     const foot = el('div', { class: 'slot-foot' }, retTile, right);
-    const wbar = el('div', { class: 'wbar', title: `실제 ${x.actual_weight.toFixed(1)}% / 목표 ${x.weight}%` },
-      el('i', { style: `width:${Math.min(100, x.actual_weight)}%;background:${slotColor(i)}` }), el('b', { style: `left:${Math.min(100, x.weight)}%` }));
-    card.append(head, when, price, strat, state, wbar, foot);
-    card.onclick = () => selectMarket(x.rank_key);
+    // 넣기·빼기·전략 바꾸기·지우기 (누르면 카드 아래에 칸이 열린다)
+    const acts = el('div', { class: 'slot-actions' }), panel = el('div');
+    const open = (kind) => { S.open = S.open.slot === x.id && S.open.kind === kind ? {} : { slot: x.id, kind }; renderSlots(S.data.status); };
+    const removeLabel = x.closing ? '팔고 지우기 취소' : x.holding ? '팔고 지우기' : '지우기';
+    for (const [kind, label, cls] of [['in', '🏦→ 넣기', ''], ['out', '→🏦 빼기', 'ghost'], ['strategy', '전략 바꾸기', 'ghost'], ['remove', removeLabel, 'ghost']]) {
+      const b = el('button', { type: 'button', class: cls, text: label });
+      b.onclick = (ev) => { ev.stopPropagation(); open(kind); };
+      acts.append(b);
+    }
+    if (S.open.slot === x.id) panel.append(slotPanel(x, S.open.kind));
+    card.append(head, when, price, strat, state, foot, acts, panel);
+    card.onclick = (ev) => { if (!ev.target.closest('.slot-actions, .panel')) selectMarket(x.rank_key); };
     box.append(card);
   });
+  const add = el('div', { class: 'card add-card', text: '＋ 코인 계좌 만들기' });
+  add.onclick = () => openAdd();
+  box.append(add);
 }
 
 function selectMarket(key) {  // key = "종목|주기" (주기를 빼면 일봉)
@@ -562,8 +587,8 @@ function renderAlerts(d) {
       add('warn', '🌐', '집 공인 IP가 바뀐 것 같아요.', `${net.upbit_ok_ip} → ${net.ip} · 업비트 Open API 관리에서 허용 IP를 ${net.ip}(으)로 바꿔야 실거래 주문이 나가요.`);
     if (d.pending_order)
       add('info', '⏳', '끊기기 전에 낸 주문을 확인하는 중이에요.', '업비트에 결과를 물어서 장부를 맞춘 뒤 바로 이어서 매매해요.');
-    const small = s.slots.filter(x => !x.holding && x.book.krw < 5000 && x.book.krw >= 0 && x.weight > 0 && s.account.equity * x.weight / 100 < 5000);
-    if (small.length) add('warn', '🪙', '몫이 너무 작은 종목이 있어요.', `${small.map(x => sym(x.market)).join(', ')}의 몫이 업비트 최소 주문 금액(5,000원)보다 적어서 살 수 없어요. 비중을 늘려 주세요.`);
+    const small = s.slots.filter(x => !x.holding && x.book.krw > 0 && x.book.krw < (d.min_order || 5000));
+    if (small.length) add('warn', '🪙', '원화가 너무 적은 계좌가 있어요.', `${small.map(x => x.name).join(', ')}의 원화가 업비트 최소 주문 금액(5,000원)보다 적어서 살 수 없어요. 금고에서 더 넣어 주세요.`);
   }
   if (d.live_ready && d.key_info && d.key_info.expire_at) {
     const left = Math.floor((new Date(d.key_info.expire_at) - parseTs(d.server_time)) / 86400e3);
@@ -725,38 +750,38 @@ function renderEquity(points, base) {
   box.innerHTML = ''; box.append(root);
 }
 
-// ---------- 포트폴리오 설정 ----------
-function settingsSig(d) {
-  const s = d.status;
-  return JSON.stringify([s && s.settings, Object.keys(d.rankings || {}).map(k => k + (d.rankings[k].computed_at || '')), (d.markets || []).length]);
+// ---------- 요청 (PIN) ----------
+// 코인 계좌 만들기·이체·전략 바꾸기·지우기·계좌 전환은 요청을 하나씩 봇에게 보내고, 결과는 다음 새로고침 때 알림으로 온다
+async function send(body, pinInput, done) {
+  const p = (pinInput && pinInput.value) || S.pin;
+  if (!p) { toast('PIN을 넣어 주세요', 'bad'); if (pinInput) pinInput.focus(); return false; }
+  try {
+    const r = await postJSON('/api/control', { ...body, pin: p });
+    if (!r.ok) { toast(r.message, 'bad'); return false; }
+    S.pin = p;  // 이 창을 닫기 전까지만 기억 (다음 요청에 PIN을 다시 안 넣어도 되게)
+    S.mine[r.id] = true;
+    toast('⏳ ' + r.message, 'info');
+    if (done) done();
+    setTimeout(refreshStatus, 1500);
+    return true;
+  } catch (e) { toast('요청을 보내지 못했어요. 파이 연결을 확인해 주세요.', 'bad'); return false; }
 }
-function loadRows(d) {
-  const s = d.status;
-  const set = s ? s.settings : { mode: 'paper', budget: 100000, slots: [] };
-  S.rows = set.slots.map(x => ({ ...x, rule: normalizeRule(x) }));  // 예전 줄은 살 때·팔 때 같은 전략 하나
-  S.mode = set.mode;
-  const all = set.budget === 'all';
-  $('budget').value = all ? 100000 : Math.round(set.budget);
-  $('budgetAll').checked = all;
-  $('confirmLive').checked = false;
+function pinField() { return el('input', { type: 'password', inputmode: 'numeric', placeholder: S.pin ? 'PIN (기억됨)' : 'PIN', autocomplete: 'off', maxlength: 32, 'aria-label': 'PIN' }); }
+function renderResults(results) {  // 내가 보낸 요청의 결과만 알림으로
+  for (const r of results || []) {
+    if (!S.mine[r.id]) continue;
+    delete S.mine[r.id];
+    toast((r.ok ? '✅ ' : '⚠️ ') + r.message, r.ok ? 'ok' : 'bad');
+  }
 }
-function renderEditorIfNeeded() {
-  const d = S.data, sig = settingsSig(d);
-  if (sig !== S.editSig && !S.dirty) { loadRows(d); S.editSig = sig; renderEditor(); }
-  updateFormView();
-}
-function marketChoices(current) {
-  const list = (S.data.markets || []).map(m => m.market);
-  for (const r of S.rows) if (!list.includes(r.market)) list.unshift(r.market);
-  if (current && !list.includes(current)) list.unshift(current);
-  return list;
-}
-function fillMarketSelect(sel, current, used = new Set()) {  // 거래대금 상위 30개, 그 아래 나머지 전부 가나다순
+
+// ---------- 종목·판단 주기·전략 고르는 칸 ----------
+function fillMarketSelect(sel, current) {  // 거래대금 상위 30개, 그 아래 나머지 전부 가나다순
   sel.innerHTML = '';
   const all = (S.data.markets || []).map(m => m.market);
   const names = Object.fromEntries((S.data.markets || []).map(m => [m.market, m.name]));
-  const option = (m) => { const o = el('option', { value: m, text: `${names[m] || marketName(m)} (${sym(m)})` }); o.disabled = used.has(m); return o; };
-  for (const m of marketChoices(current)) if (!all.includes(m)) sel.append(option(m));  // 목록에 없는 줄 종목
+  const option = (m) => el('option', { value: m, text: `${names[m] || marketName(m)} (${sym(m)})` });
+  if (current && !all.includes(current)) sel.append(option(current));
   const groups = [['거래대금 상위 30', all.slice(0, 30)],
                   ['나머지 (가나다순)', all.slice(30).sort((a, b) => names[a].localeCompare(names[b], 'ko'))]];
   for (const [label, list] of groups) {
@@ -765,146 +790,161 @@ function fillMarketSelect(sel, current, used = new Set()) {  // 거래대금 상
     list.forEach(m => g.append(option(m)));
     sel.append(g);
   }
-  sel.value = current;
+  if (current) sel.value = current;
 }
-function renderEditor() {
-  const box = $('editor'); box.innerHTML = '';
-  box.append(el('div', { class: 'erow ehead' }, el('span'), el('span', { text: '종목' }), el('span', { text: '판단 주기' }),
-                el('span', { text: '비중' }), el('span')));
-  S.rows.forEach((row, i) => {
-    row.tf = row.tf || '1d';
-    const used = new Set(S.rows.filter((_, j) => j !== i).map(r => r.market));
-    const ms = el('select', { 'aria-label': '종목' });
-    fillMarketSelect(ms, row.market, used);
-    ms.onchange = () => { row.market = ms.value; touch(); requestRanking(row.market, row.tf); renderEditor(); };
-    const ts_ = el('select', { 'aria-label': '판단 주기', class: 'tfsel', title: '이 주기의 봉이 바뀔 때마다 계획을 새로 세워요' });
-    for (const t of (S.data.timeframes || [])) ts_.append(el('option', { value: t.id, text: t.label }));
-    ts_.value = row.tf;
-    ts_.onchange = () => { row.tf = ts_.value; S.focusRow = i; touch(); requestRanking(row.market, row.tf); renderEditor(); };
-    const key = rkey(row.market, row.tf), rk = ranking(key);
-    // 살 때·팔 때 전략 (이 종목·주기 기준 순위). 예전 줄은 살 때·팔 때 같은 전략 하나
-    row.rule = normalizeRule(row.rule || row);
-    const options = () => rankedList(key).map(r => ({ value: r.name,
-      text: (r.rank ? `${r.rank}위 · ` : '') + r.label + (r.total_return != null ? ` (${pct(r.total_return * 100, 0)})` : '') }));
-    const rb = ruleBuilder(row.rule, options, (rule) => { row.strategy = rule.strategy; S.focusRow = i; touch(); });
-    rb.addEventListener('focusin', () => { S.focusRow = i; updateFormView(); });
-    if (!rk || !rk.results) rb.append(el('span', { class: 'hint', text: rk && rk.error ? `⚠️ ${rk.error}` : '⏳ 이 종목·주기 순위 계산 중…' }));
-    const w = el('input', { type: 'number', min: 0, max: 100, step: 1, value: row.weight, inputmode: 'numeric', 'aria-label': '비중', title: '0%면 사지 않고 지켜보기만 해요' });
-    w.oninput = () => { row.weight = Number(w.value); touch(); };
-    const del = el('button', { type: 'button', class: 'del', title: '이 줄 빼기', text: '🗑' });
-    del.onclick = () => { S.rows.splice(i, 1); touch(); renderEditor(); };
-    const stop = stopField(row.stop_loss || 0, (pct) => { row.stop_loss = pct; S.focusRow = i; touch(); });
-    box.append(el('div', { class: 'erow' }, el('span', { class: 'swatch', style: `background:${slotColor(i)}` }), ms, ts_,
-                   el('div', { class: 'w' }, w, el('span', { class: 'hint', text: '%' })), del, rb, stop));
-    if (!rk) requestRanking(row.market, row.tf);
-  });
-  if (!S.rows.length) box.append(el('div', { class: 'empty', text: '종목을 하나 이상 추가해 주세요' }));
-  updateFormView();
+function fillTfSelect(sel, current) {
+  sel.innerHTML = '';
+  for (const t of (S.data.timeframes || [])) sel.append(el('option', { value: t.id, text: t.label }));
+  sel.value = current || '1d';
 }
-function addRow(market, strategy, tf = '1d', rule = null, stop = 0) {
-  if (S.rows.length >= 10) { S.userMsg = true; setMsg('종목은 10개까지 넣을 수 있어요.', 'bad'); return; }
-  if (S.rows.some(r => r.market === market)) return;
-  const sum = S.rows.reduce((t, r) => t + (Number(r.weight) || 0), 0);
-  const first = rankedList(rkey(market, tf))[0];
-  const main = strategy || (first ? first.name : 'volatility_breakout');
-  S.rows.push({ id: '', market, tf, strategy: main, rule: normalizeRule(rule || { strategy: main }), stop_loss: stop,
-                weight: Math.max(0, Math.min(20, 100 - sum)) });  // 합계가 이미 100%면 0%(지켜보기)로 추가
-  touch(); requestRanking(market, tf); renderEditor();
+function rankOptions(key) {  // 이 종목·주기 기준 순위대로
+  return rankedList(key).map(r => ({ value: r.name,
+    text: (r.rank ? `${r.rank}위 · ` : '') + r.label + (r.total_return != null ? ` (${pct(r.total_return * 100, 0)})` : '') }));
 }
-$('addRow').onclick = () => {
-  const free = marketChoices().find(m => !S.rows.some(r => r.market === m));
-  if (free) addRow(free);
-};
-$('equalize').onclick = () => {  // 0%(지켜보기) 줄은 빼고 나눈다. 전부 0%면 모두에게
-  if (!S.rows.length) return;
-  const active = S.rows.some(r => Number(r.weight) > 0) ? S.rows.filter(r => Number(r.weight) > 0) : S.rows;
-  const each = Math.floor(100 / active.length);
-  active.forEach((r, i) => { r.weight = each + (i < 100 - each * active.length ? 1 : 0); });
-  touch(); renderEditor();
-};
+function rankNote(key) {
+  const rk = ranking(key);
+  return rk && rk.results ? '(이 종목·주기 순위)' : rk && rk.error ? `(${rk.error})` : '(순위 계산 중…)';
+}
+function guideLines(box, rule, tf) {  // 고른 전략마다 한 줄씩
+  box.innerHTML = '';
+  for (const name of rule ? [...new Set([...rule.buy, ...rule.sell])] : []) {
+    const g = (S.data.strategies || []).find(x => x.name === name);
+    if (g) box.append(el('div', {}, el('b', { text: `💡 ${g.label} · ` }), fmtGuide(g.guide || g.description, tf)));
+  }
+  box.hidden = !box.childNodes.length;
+}
 async function requestRanking(market, tf = '1d', refresh = false) {  // refresh: 순위가 있어도 봉을 새로 받아 달라고
   const key = rkey(market, tf);
   if (!market || (!refresh && ranking(key)) || Date.now() - (S.requested[key] || 0) < (refresh ? 60000 : 120000)) return;
   S.requested[key] = Date.now();
   try { await postJSON('/api/ranking', { market, tf }); } catch (e) {}
 }
-function touch() { S.dirty = true; updateFormView(); }
-function needsLiveConfirm() {  // 실거래로 넘어갈 때와 계좌 전액으로 바꿀 때만 '실제 돈' 체크를 받는다 (서버와 같은 규칙)
-  const s = S.data && S.data.status, cur = s ? s.settings : {};
-  return S.mode === 'live' && (cur.mode !== 'live' || ($('budgetAll').checked && cur.budget !== 'all'));
+
+// ---------- 코인 계좌 카드의 버튼 칸 (넣기·빼기·전략 바꾸기·지우기) ----------
+function slotPanel(x, kind) {
+  const p = el('div', { class: 'panel' }), row = el('div', { class: 'row' }), pin = pinField();
+  const close = () => { S.open = {}; renderSlots(S.data.status); };
+  if (kind === 'in' || kind === 'out') {
+    const max = kind === 'in' ? S.data.status.account.vault : x.book.krw;
+    const amt = el('input', { type: 'number', min: 0, step: 10000, placeholder: '금액 (원)', inputmode: 'numeric' });
+    const all = el('label', { class: 'toggle' }, el('input', { type: 'checkbox' }), '전부');
+    const go = el('button', { type: 'button', class: 'primary', text: kind === 'in' ? '금고 → 이 계좌' : '이 계좌 → 금고' });
+    go.onclick = () => {
+      const every = all.querySelector('input').checked;
+      if (!every && !(Number(amt.value) > 0)) { toast('금액을 넣어 주세요', 'bad'); return; }
+      send({ action: 'transfer', slot: x.id, direction: kind, amount: Number(amt.value), all: every }, pin, close);
+    };
+    row.append(amt, all, pin, go);
+    p.append(row, el('span', { class: 'hint', text: kind === 'in'
+      ? `금고에 ${won(max)} 있어요. 넣어도 바로 사지 않고, 매수 신호가 날 때 이 계좌 원화로 사요.`
+      : `이 계좌 원화 ${won(max)}을(를) 금고로 옮겨요. 코인은 그대로예요.` }));
+  } else if (kind === 'strategy') {  // 살 때·팔 때 전략, 판단 주기, 손절선 (고치는 중인 값은 5초마다 다시 그려도 남게)
+    if (!S.open.rule) Object.assign(S.open, { rule: slotRule(x), tf: x.tf, stop: x.stop_loss || 0 });
+    const ts_ = el('select', { class: 'tfsel', 'aria-label': '판단 주기' });
+    fillTfSelect(ts_, S.open.tf);
+    ts_.onchange = () => { S.open.tf = ts_.value; requestRanking(x.market, S.open.tf); renderSlots(S.data.status); };
+    const rb = ruleBuilder(S.open.rule, () => rankOptions(rkey(x.market, S.open.tf)), () => {});
+    const stop = stopField(S.open.stop, (pct) => { S.open.stop = pct; });
+    const go = el('button', { type: 'button', class: 'primary', text: '바꾸기' });
+    go.onclick = () => send({ action: 'strategy', slot: x.id, ...ruleFields(S.open.rule), tf: S.open.tf, stop_loss: S.open.stop || 0 }, pin, close);
+    row.append(pin, go);
+    p.append(el('label', { class: 'hint' }, '판단 주기 ', ts_), rb, stop, row,
+             el('span', { class: 'hint', text: '들고 있는 코인은 팔지 않고, 새 전략이 다음 봉부터 판단해요. 손절선은 산 값보다 정한 만큼 떨어지면 바로 팔아요.' }));
+  } else {  // 지우기: 코인이 있으면 '팔고 지우기' (바로 다 판 뒤에 지운다)
+    const action = x.closing ? 'cancel_close' : x.holding ? 'close' : 'remove';
+    const go = el('button', { type: 'button', class: 'primary', text: x.closing ? '팔고 지우기 취소' : x.holding ? '팔고 지우기' : '지우기' });
+    go.onclick = () => {
+      if (action === 'close' && !confirm(`${x.name}: 코인을 지금 시장가로 다 팔고 계좌를 지울까요?` + (S.data.status.mode === 'live' ? '\n\n⚠️ 실제 돈으로 업비트에 매도 주문이 나가요.' : ''))) return;
+      send({ action, slot: x.id }, pin, close);
+    };
+    row.append(pin, go);
+    p.append(row, el('span', { class: 'hint', text: x.closing ? '취소하면 지우지 않고 다시 전략대로 사고팔아요.'
+      : x.holding ? '들고 있는 코인을 바로 다 팔고 나서 지워요. 판 돈과 원화는 금고로 옮겨요.'
+      : `원화 ${won(x.book.krw)}은 금고로 옮기고 지워요.` }));
+  }
+  p.onclick = (ev) => ev.stopPropagation();
+  return p;
 }
-function updateFormView() {
-  const d = S.data, s = d && d.status;
-  const sum = S.rows.reduce((t, r) => t + (Number(r.weight) || 0), 0);
-  const bar = $('sumBar'); bar.innerHTML = '';
-  S.rows.forEach((r, i) => bar.append(el('i', { style: `width:${Math.max(0, Math.min(100, r.weight))}%;background:${slotColor(i)}` })));
-  $('sumText').textContent = sum > 100 ? `⚠️ 합계 ${sum}% · 100% 이하로 줄여 주세요` : `합계 ${sum}% · 대기 원화 ${(100 - sum).toFixed(0)}%`;
-  $('sumText').className = sum > 100 ? 'down' : '';
-  $('sumHint').textContent = '비중만 바꾸면 팔지 않고 몫만 다시 나눠요 · 0%는 지켜보기만 해요';
+
+// ---------- 코인 계좌 만들기 ----------
+S.add = null;
+function openAdd(preset = {}) {  // preset: {market, tf, rule, stop} (시뮬레이션·급등락 목록에서 바로 만들 때)
+  S.add = { market: preset.market || 'KRW-BTC', tf: preset.tf || '1d',
+            rule: preset.rule ? normalizeRule(preset.rule) : null, touched: !!preset.rule, stop: preset.stop || 0 };
+  $('addBox').hidden = false;
+  if (S.addStopBox) S.addStopBox.set(S.add.stop);
+  renderAdd();
+  requestRanking(S.add.market, S.add.tf);
+  $('addBox').scrollIntoView({ block: 'start' });
+}
+function addSig() { const a = S.add, rk = a && ranking(rkey(a.market, a.tf)); return a ? `${a.market}|${a.tf}|${rk ? rk.computed_at || rk.error || '' : ''}` : ''; }
+function renderAdd() {
+  const a = S.add; if (!a) return;
+  const key = rkey(a.market, a.tf), list = rankedList(key);
+  if (!a.rule || !a.touched) a.rule = normalizeRule({ strategy: list[0].name });  // 손대기 전에는 이 종목·주기 1위 전략 하나
+  S.addSig = addSig();
+  fillMarketSelect($('addMarket'), a.market);
+  fillTfSelect($('addTf'), a.tf);
+  $('addRule').innerHTML = '';
+  $('addRule').append(ruleBuilder(a.rule, () => rankOptions(key), () => { a.touched = true; guideLines($('addGuide'), a.rule, a.tf); }));
+  if (!S.addStopBox) {  // 손절선 (한 번만 만든다: 숫자를 고치는 중에 다시 그리지 않게)
+    S.addStopBox = stopField(a.stop, (pct) => { if (S.add) S.add.stop = pct; });
+    $('addStop').append(S.addStopBox);
+  }
+  $('addRankNote').textContent = rankNote(key);
+  guideLines($('addGuide'), a.rule, a.tf);
+}
+$('addMarket').onchange = () => { S.add.market = $('addMarket').value; requestRanking(S.add.market, S.add.tf); renderAdd(); };
+$('addTf').onchange = () => { S.add.tf = $('addTf').value; requestRanking(S.add.market, S.add.tf); renderAdd(); };
+$('addClose').onclick = () => { $('addBox').hidden = true; S.add = null; };
+$('addGo').onclick = () => {
+  const a = S.add; if (!a) return;
+  send({ action: 'add', market: a.market, tf: a.tf, ...ruleFields(a.rule), stop_loss: a.stop || 0, amount: Number($('addAmount').value) || 0 },
+       $('addPin'), () => { $('addBox').hidden = true; $('addAmount').value = ''; $('addPin').value = ''; S.add = null; S.addStopBox.set(0); });
+};
+
+// ---------- 금고 (모의투자 가상 입출금) ----------
+for (const [id, sign] of [['paperIn', 1], ['paperOut', -1]]) {
+  $(id).onclick = () => {
+    const box = $('vaultPanel'); box.innerHTML = '';
+    const p = el('div', { class: 'panel' }), row = el('div', { class: 'row' }), pin = pinField();
+    const amt = el('input', { type: 'number', min: 0, step: 100000, placeholder: '금액 (원)', inputmode: 'numeric' });
+    const go = el('button', { type: 'button', class: 'primary', text: sign > 0 ? '가상 입금' : '가상 출금' });
+    go.onclick = () => { if (!(Number(amt.value) > 0)) { toast('금액을 넣어 주세요', 'bad'); return; }
+      send({ action: 'paper_cash', amount: sign * Number(amt.value) }, pin, () => { box.innerHTML = ''; }); };
+    const cancel = el('button', { type: 'button', class: 'ghost', text: '닫기' }); cancel.onclick = () => { box.innerHTML = ''; };
+    row.append(amt, pin, go, cancel); p.append(row); box.append(p); amt.focus();
+  };
+}
+
+// ---------- 계좌 설정 (모의투자 ↔ 실거래) ----------
+S.mode = null;
+function renderSettings(d) {
+  const s = d.status;
+  if (!s) return;
+  if (S.mode == null) S.mode = s.mode;
   $('modePaper').setAttribute('aria-pressed', S.mode === 'paper');
   $('modeLive').setAttribute('aria-pressed', S.mode === 'live');
-  $('modeLive').disabled = !(d && d.live_ready);
-  let keyText = d && d.live_ready ? '✅ 업비트 키 연결됨' : '🔑 키 없음 · 파이에서 python3 -m mypie.keys';
-  if (d && d.live_ready && d.key_info && d.key_info.expire_at) {
+  $('modeLive').disabled = !d.live_ready;
+  let keyText = d.live_ready ? '✅ 업비트 키 연결됨' : '🔑 키 없음 · 파이에서 python3 -m mypie.keys';
+  if (d.live_ready && d.key_info && d.key_info.expire_at) {
     const left = Math.floor((new Date(d.key_info.expire_at) - parseTs(d.server_time)) / 86400e3);
     keyText += ` · 만료 ${d.key_info.expire_at.slice(0, 10)} (${left <= 30 ? '⚠️ ' : ''}${left}일 남음)`;
   }
   $('keyState').textContent = keyText;
-  const live = S.mode === 'live', all = $('budgetAll').checked;
-  $('budgetLabel').hidden = $('budgetField').hidden = !live;
-  $('budget').disabled = all;
-  if (d) { $('budget').min = d.limits.min_budget; $('budget').max = d.limits.max_budget; }
-  $('budgetHint').textContent = all
-    ? '업비트 계좌의 원화와 포트폴리오 종목 코인 전체를 비중대로 굴려요. 원래 있던 코인은 그 종목 줄의 보유분이 되고, 입금하면 비중대로 나눠서 추가 매수해요.'
-    : '이 금액을 비중대로 나눠서 시작해요. 번 돈은 각 줄에서 다음 매매에 다시 들어가요. 업비트에 원래 있던 다른 돈·코인은 건드리지 않아요.';
-  $('confirmRow').hidden = !needsLiveConfirm();
-  const ready = d && d.pin_set && s;
-  $('pin').disabled = !ready;
-  $('apply').disabled = !ready || sum > 100 || !S.rows.length;
-  const row = S.rows[S.focusRow != null && S.rows[S.focusRow] ? S.focusRow : 0];
-  const g = row && d ? rankedList(rkey(row.market, row.tf)).find(r => r.name === row.strategy) : null;
-  $('pickGuide').hidden = !g;
-  if (g) { $('pickGuide').innerHTML = ''; $('pickGuide').append(el('b', { text: `💡 ${sym(row.market)} · ${g.label} · ` }), fmtGuide(g.guide || g.description, row.tf)); }
-  if (d && d.pending) { setMsg('설정을 바꾸는 중이에요…', 'info'); S.userMsg = false; }
-  else if (d && !d.pin_set && !S.userMsg) setMsg('설정을 바꾸려면 PIN이 필요해요. 파이에서 python3 -m mypie.pin 을 실행해서 만들어 주세요.', 'info');
-  else if (!S.userMsg) setMsg('', '');
+  $('confirmRow').hidden = !(S.mode === 'live' && s.mode !== 'live');
+  $('modeGo').disabled = !d.pin_set || S.mode === s.mode;
+  setMsg(!d.pin_set ? '설정을 바꾸려면 PIN이 필요해요. 파이에서 python3 -m mypie.pin 을 실행해서 만들어 주세요.'
+         : d.pending ? '봇이 요청을 처리하는 중이에요…' : '', 'info');
 }
-$('budget').addEventListener('input', touch);
-$('budgetAll').addEventListener('change', touch);
-$('modePaper').addEventListener('click', () => { S.mode = 'paper'; touch(); });
-$('modeLive').addEventListener('click', () => { S.mode = 'live'; touch(); });
-$('reset').addEventListener('click', () => { S.dirty = false; S.editSig = ''; S.userMsg = false; if (S.data) renderAll(); });
-$('apply').addEventListener('click', async () => {
-  const d = S.data, s = d && d.status;
-  if (!s) return;
-  const cur = s.settings, all = S.mode === 'live' && $('budgetAll').checked;
-  const body = { mode: S.mode, budget: all ? 'all' : Number($('budget').value), pin: $('pin').value, confirm_live: $('confirmLive').checked,
-                 slots: S.rows.map(r => ({ id: r.id || '', market: r.market, ...ruleFields(r.rule || r), tf: r.tf || '1d', weight: Number(r.weight),
-                                           ...(r.stop_loss > 0 ? { stop_loss: r.stop_loss } : {}) })) };
-  S.userMsg = true;
-  if (!body.pin) { setMsg('PIN을 입력해 주세요.', 'bad'); $('pin').focus(); return; }
-  if (needsLiveConfirm() && !body.confirm_live) { setMsg("실거래로 바꾸려면 '실제 돈으로 주문이 나간다'에 체크해 주세요.", 'bad'); return; }
-  const accountChanged = body.mode !== cur.mode || (body.mode === 'live' && String(body.budget) !== String(cur.budget === 'all' ? 'all' : Math.round(cur.budget)));
-  const lines = S.rows.map(r => `· ${marketLabel(r.market)} — ${TF(r.tf || "1d").short} · ${ruleText(r.rule || r, stratLabel)} ${r.weight}%`
-                                + (r.stop_loss > 0 ? ` · ${stopText(r.stop_loss)}` : ''));
-  lines.unshift(`계좌: ${body.mode === 'live' ? (all ? '실거래 (계좌 전액)' : `실거래 (한도 ${won(body.budget)})`) : '모의투자'}`);
-  const willSell = s.slots.filter(x => x.holding && (accountChanged || !S.rows.some(r => r.id === x.id && r.market === x.market && sameRule(r.rule || r, slotRule(x)) && (r.tf || "1d") === x.tf)));
-  if (willSell.length) lines.push('', `바로 매도돼요: ${willSell.map(x => sym(x.market)).join(', ')}`);
-  const cutNow = accountChanged ? [] : s.slots.filter(x => {  // 새 손절선이 지금 가격보다 위면 곧바로 손절
-    const r = S.rows.find(r => r.id === x.id), b = x.book;
-    return x.holding && r && r.stop_loss > 0 && !willSell.includes(x) && b.coin > 0 && x.price <= b.cost / b.coin * (1 - r.stop_loss / 100);
-  });
-  if (cutNow.length) lines.push('', `지금 가격이 손절선 아래라 곧바로 팔려요: ${cutNow.map(x => sym(x.market)).join(', ')}`);
-  if (body.mode === 'live') lines.push('', '⚠️ 실제 돈으로 업비트에 주문이 나가요.');
-  if (!confirm('이렇게 바꿀까요?\n\n' + lines.join('\n'))) return;
-  $('apply').disabled = true;
-  try {
-    const data = await postJSON('/api/control', body);
-    setMsg(data.message, data.ok ? 'ok' : 'bad');
-    if (data.ok) { $('pin').value = ''; S.dirty = false; S.editSig = ''; refreshStatus(); toast('⚙️ 설정 변경을 요청했어요', 'info'); }
-  } catch (e) { setMsg('요청을 보내지 못했어요. 파이 연결을 확인해 주세요.', 'bad'); }
-  finally { updateFormView(); }
-});
+$('modePaper').onclick = () => { S.mode = 'paper'; renderSettings(S.data); };
+$('modeLive').onclick = () => { S.mode = 'live'; renderSettings(S.data); };
+$('modeGo').onclick = () => {
+  if (S.mode === 'live' && S.data.status.mode !== 'live' && !$('confirmLive').checked) { toast("'실제 돈으로 주문이 나간다'에 체크해 주세요", 'bad'); return; }
+  if (!confirm(S.mode === 'live' ? '실거래로 바꿀까요?\n\n⚠️ 업비트 계좌에 실제 주문이 나가요. 계좌 원화는 실거래 금고로 들어와요.' : '모의투자로 바꿀까요?\n\n실거래 코인은 팔지 않고 그대로 둬요.')) return;
+  send({ action: 'mode', mode: S.mode, confirm_live: $('confirmLive').checked }, $('modePin'),
+       () => { $('modePin').value = ''; $('confirmLive').checked = false; S.mode = null; });
+};
 
 // ---------- 텔레그램 ----------
 function tgMsg(text, kind) { $('tgMsg').textContent = text; $('tgMsg').className = 'msg ' + (kind || ''); }
@@ -1040,12 +1080,9 @@ function renderSimControls() {
 $('simMarket').onchange = () => { S.simSel.market = $('simMarket').value; refreshSim(); };
 $('simTf').onchange = () => { const q = S.simSel; q.tf = $('simTf').value; q.days = SIM_DEFAULT_DAYS[q.tf]; refreshSim(); renderGuides(S.data); };
 $('simDays').onchange = () => { S.simSel.days = +$('simDays').value; refreshSim(); };
-$('simUse').onclick = () => {  // 저장은 설정 칸에서 PIN을 넣고 해야 실제로 바뀐다
+$('simUse').onclick = () => {  // 고른 종목·주기·조합·손절선으로 계좌 만들기 칸을 채운다 (만드는 건 PIN을 넣고)
   const q = S.simSel; if (!q || !q.rule) return;
-  const row = S.rows.find(x => x.market === q.market), rule = normalizeRule(q.rule);
-  if (row) { row.rule = rule; row.strategy = rule.strategy; row.tf = q.tf; row.stop_loss = q.stop || 0; S.focusRow = S.rows.indexOf(row); touch(); renderEditor(); }
-  else addRow(q.market, rule.strategy, q.tf, rule, q.stop || 0);
-  $('settings').scrollIntoView({ block: 'start' });
+  openAdd({ market: q.market, tf: q.tf, rule: q.rule, stop: q.stop || 0 });
 };
 
 function renderSim() {
@@ -1270,7 +1307,7 @@ function renderMovers(d) {
       const row = el('div', { class: 'mover', title: '눌러서 포트폴리오 설정에 추가' },
         el('span', { class: 'n' }, t.name, el('small', { text: sym(t.market) })),
         el('span', { class: 'num ' + (t.change_rate > 0 ? 'up' : t.change_rate < 0 ? 'down' : ''), text: pct(t.change_rate * 100) }));
-      row.onclick = () => { addRow(t.market); selectMarket(t.market); $('settings').scrollIntoView({ block: 'start' }); };
+      row.onclick = () => { selectMarket(t.market); openAdd({ market: t.market }); };
       box.append(row);
     }
   }

@@ -1,10 +1,9 @@
 # My_Pie 설정 파일
 # 이 파일을 config.toml로 복사해서 고쳐 쓰세요. (처음 설치할 때 자동으로 복사돼요)
-# 종목·계좌·한도·전략은 웹페이지에서 바꾸는 게 편해요. 여기 값은 처음 시작할 때의 기본값이에요.
+# 금고·코인 계좌·전략은 웹페이지에서 바꿔요. 여기 값은 처음 시작할 때의 기본값과 세부 숫자예요.
 # 고친 뒤에는 봇을 재시작해야 적용돼요: systemctl --user restart mypie-bot mypie-web
 
 [general]
-market = "KRW-BTC"        # 처음 거래할 종목 (업비트 표기)
 mode = "paper"            # paper = 모의투자, live = 실거래
 interval_sec = 10         # 시세 확인 간격 (초)
 db_path = "data/mypie.db" # 기록 저장 위치
@@ -17,12 +16,8 @@ invest_ratio = 1.0        # 매수할 때 (봇) 원화 중 쓸 비율 (0.5 = 절
 min_order_krw = 5000      # 업비트 최소 주문 금액
 
 [paper]
-initial_krw = 1000000     # 모의투자 시작 금액
+initial_krw = 1000000     # 모의투자 금고 시작 금액
 fee_rate = 0.0005         # 업비트 원화 마켓 수수료 0.05%
-
-[live]
-budget = 100000           # 실거래 투자 한도 기본값 (봇은 이 금액 안에서만 사고팖)
-max_budget = 1000000      # 웹페이지에서 정할 수 있는 한도의 최댓값 (실수로 0 하나 더 붙이는 것 방지)
 
 [backtest]
 days = 1095               # 전략 순위를 매길 과거 기간 (일)
