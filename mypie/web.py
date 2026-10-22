@@ -24,13 +24,13 @@ import subprocess
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import auth, backtest, krx, pin, telegram, timeframes, toss
+from . import auth, backtest, krx, pin, telegram, timeframes, toss, upbit
 from .bot import validate_slots
 from .broker import MIN_ORDER_KRW
 from .config import load_config
@@ -94,6 +94,62 @@ def build_payload(db_path: str, max_budget: float) -> dict:
     finally:
         db.close()
     return payload
+
+
+# 코인 가격 차트 기간 → (봉 종류, 봉 개수). 봇이 모아 둔 봉과 상관없이 업비트에서 바로 받는다
+COIN_CHART = {"1h": ("1m", 60), "1d": ("15m", 96), "1w": ("60m", 168), "1m": ("240m", 180), "3m": ("1d", 90),
+              "6m": ("1d", 180), "1y": ("1d", 365), "5y": ("1w", 261)}
+CHART_CACHE_SEC = 60
+_chart_lock = threading.Lock()
+_chart_cache: dict[tuple, tuple[float, list]] = {}
+
+
+def _cached(key: tuple, seconds: float, fetch):
+    """같은 차트를 seconds 안에 또 부르면 저장해 둔 것을 준다 (업비트·토스증권 호출을 줄인다)."""
+    with _chart_lock:
+        hit = _chart_cache.get(key)
+        if hit and time.monotonic() - hit[0] < seconds:
+            return hit[1]
+    value = fetch()
+    with _chart_lock:
+        _chart_cache[key] = (time.monotonic(), value)
+        for old in [k for k, (at, _) in _chart_cache.items() if time.monotonic() - at > 3600]:
+            del _chart_cache[old]
+    return value
+
+
+def build_coin_chart(db_path: str, market: str, span: str) -> dict:
+    """코인 가격 차트: 기간에 맞는 봉(15분봉~주봉)을 업비트에서 받는다 (진행 중인 봉까지) + 그 기간의 매매 지점."""
+    out = {"market": market, "span": span, "candles": [], "trades": []}
+    if not MARKET_PATTERN.match(market) or span not in COIN_CHART:
+        return {**out, "message": "잘못된 요청이에요."}
+    tf, count = COIN_CHART[span]
+
+    def fetch() -> list[dict]:
+        rows, to = [], None
+        while len(rows) < count:
+            batch = upbit.get_candles(market, tf, min(200, count - len(rows)), to)
+            if not batch:
+                break
+            rows += batch
+            to = batch[-1]["day"]
+            time.sleep(0.1)  # 업비트 요청 제한 배려
+        return rows[::-1]
+
+    try:
+        candles = _cached(("coin", market, span), CHART_CACHE_SEC, fetch)
+    except upbit.UpbitError as e:
+        return {**out, "tf": tf, "message": f"업비트에서 봉을 받지 못했어요 ({e})"}
+    out.update(tf=tf, candles=candles)
+    db = _open(db_path)
+    if db and candles:
+        try:
+            mode = (db.get_state("status") or {}).get("mode", "paper")
+            trades = db.trades(mode, market, ts(timeframes.key_to_utc(candles[0]["day"])))
+            out["trades"] = [{k: t[k] for k in ("ts", "side", "price", "profit")} for t in trades]
+        finally:
+            db.close()
+    return out
 
 
 def build_candles(db_path: str, market: str, count: int, tf: str = "1d") -> dict:
@@ -274,7 +330,8 @@ def build_stock_candles(stock_db: str, symbol: str, count: int) -> dict:
         db.close()
 
 
-INTRADAY_SPANS = {"1d": (5, 1), "1w": (30, 5)}  # 차트 기간 → (몇 분봉으로 묶을지, 거래일 수)
+# 주식 차트 기간 → (몇 분봉으로 묶을지, 거래일 수, 마지막 몇 개만 보일지)
+INTRADAY_SPANS = {"1h": (1, 1, 60), "1d": (5, 1, None), "1w": (30, 5, None)}
 INTRADAY_CACHE_SEC = 60
 _intraday_lock = threading.Lock()
 _intraday_cache: dict[tuple, tuple[float, dict]] = {}
@@ -294,7 +351,7 @@ def build_stock_intraday(stock_db: str, symbol: str, span: str) -> dict:
         hit = _intraday_cache.get((symbol, span))
         if hit and time.monotonic() - hit[0] < INTRADAY_CACHE_SEC:
             return hit[1]
-    minutes, days = INTRADAY_SPANS[span]
+    minutes, days, last = INTRADAY_SPANS[span]
     db = _open(stock_db)
     if not db:
         return {**out, "message": "주식 봇이 아직 시작되지 않았어요."}
@@ -331,11 +388,68 @@ def build_stock_intraday(stock_db: str, symbol: str, span: str) -> dict:
         db.close()
     # 정규장 밖(넥스트레이드 장 전·후)은 실제로 거래된 봉만 남긴다. 넥스트레이드에 없는 종목(ETF 등)은 정규장만 보인다
     shown = [c for c in candles.values() if "09:00" <= c["day"][11:] <= "15:30" or c["volume"] > 0]
+    if last:
+        shown = shown[-last:]  # 1시간: 가장 최근 1분봉 60개
     result = {**out, "minutes": minutes, "candles": shown,
               "trades": [{k: t[k] for k in ("ts", "side", "price", "profit", "volume")} for t in trades]}
     with _intraday_lock:
         _intraday_cache[(symbol, span)] = (time.monotonic(), result)
     return result
+
+
+WEEKLY_DAYS = 1300  # 주식 5년 차트: 일봉 약 5년치를 받아 주봉으로 묶는다
+
+
+def build_stock_weekly(stock_db: str, symbol: str) -> dict:
+    """주식 차트 5년: 토스증권 일봉을 받아 주봉으로 묶는다 (주의 키는 그 주 월요일). 10분 동안 저장해 둔다."""
+    out = {"symbol": symbol, "span": "5y", "weekly": True, "candles": [], "trades": []}
+    if not STOCK_SYMBOL.match(symbol):
+        return {**out, "message": "잘못된 요청이에요."}
+    creds = toss.load_credentials()
+    if not creds:
+        return {**out, "message": "토스증권 키를 등록하면 볼 수 있어요."}
+
+    def fetch() -> list[dict]:
+        db = _open(stock_db)  # 토큰은 주식 봇 DB에 저장된 것을 같이 쓴다
+        try:
+            client = toss.TossClient(*creds, db=db)
+            days, before = [], None
+            while len(days) < WEEKLY_DAYS:
+                batch = client.daily_candles(symbol, 200, before)
+                if not batch:
+                    break
+                days += batch
+                before = batch[-1]["day"]
+        finally:
+            if db:
+                db.close()
+        weeks: dict[str, dict] = {}
+        for c in sorted(days, key=lambda c: c["day"]):
+            d = date.fromisoformat(c["day"])
+            key = (d - timedelta(days=d.weekday())).isoformat()
+            w = weeks.get(key)
+            if w is None:
+                weeks[key] = {"day": key, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"],
+                              "volume": c["volume"]}
+            else:
+                w.update(high=max(w["high"], c["high"]), low=min(w["low"], c["low"]), close=c["close"],
+                         volume=w["volume"] + c["volume"])
+        return list(weeks.values())[-261:]  # 딱 5년 (52주 × 5)
+
+    try:
+        candles = _cached(("stock", symbol, "5y"), 600, fetch)
+    except toss.TossError as e:
+        return {**out, "message": str(e)}
+    out["candles"] = candles
+    db = _open(stock_db)
+    if db and candles:
+        try:
+            mode = (db.get_state("status") or {}).get("mode", "paper")
+            trades = db.trades(mode, symbol, f"{candles[0]['day']} 00:00:00")
+            out["trades"] = [{k: t[k] for k in ("ts", "side", "price", "profit", "volume")} for t in trades]
+        finally:
+            db.close()
+    return out
 
 
 def request_stock(stock_db: str, main_db: str, data: dict) -> tuple[int, dict]:
@@ -833,9 +947,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         builders = {
             "/api/status": lambda: build_payload(self.db_path, self.max_budget),
-            "/api/candles": lambda: build_candles(self.db_path, query.get("market", ["KRW-BTC"])[0],
-                                                  max(20, min(int(query.get("bars", query.get("days", ["90"]))[0]), 400)),
-                                                  query.get("tf", ["1d"])[0]),
+            "/api/candles": lambda: (
+                build_coin_chart(self.db_path, query.get("market", ["KRW-BTC"])[0], query["span"][0])
+                if "span" in query else
+                build_candles(self.db_path, query.get("market", ["KRW-BTC"])[0],
+                              max(20, min(int(query.get("bars", query.get("days", ["90"]))[0]), 400)),
+                              query.get("tf", ["1d"])[0])),
             "/api/simulate": lambda: build_simulation(self.db_path, self.cfg, query.get("market", ["KRW-BTC"])[0],
                                                       query.get("tf", ["1d"])[0], int(query.get("days", ["0"])[0] or 0),
                                                       query.get("strategy", [""])[0]),
@@ -846,6 +963,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/stock/candles": lambda: (
                 build_stock_intraday(self.stock_db_path, query.get("symbol", [""])[0], query["span"][0])
                 if query.get("span", [""])[0] in INTRADAY_SPANS else
+                build_stock_weekly(self.stock_db_path, query.get("symbol", [""])[0])
+                if query.get("span", [""])[0] == "5y" else
                 build_stock_candles(self.stock_db_path, query.get("symbol", [""])[0],
                                     max(20, min(int(query.get("bars", ["120"])[0]), 800)))),
             "/api/stock/simulate": lambda: build_stock_simulation(self.stock_db_path, self.cfg, query.get("symbol", [""])[0],

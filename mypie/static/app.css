@@ -291,3 +291,7 @@
 
   /* 카드의 '(바이앤홀드 …)' 비교 줄 */
   .hold-line { font-size: 12px; margin-top: 2px; opacity: .85; }
+
+  /* 차트 기간 버튼 8개: 좁은 화면(폰)에서는 콤보 하나로 바꾼다 */
+  .range-select { display: none; min-height: 34px; padding: 4px 10px; font-size: 13px; }
+  @media (max-width: 640px) { .seg.ranges { display: none; } .range-select { display: inline-block; margin-left: auto; } }

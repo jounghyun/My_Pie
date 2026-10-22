@@ -134,6 +134,14 @@ def get_candles(market: str, tf: str = "1d", count: int = 200, to: str | None = 
     """
     if tf == "1d":
         return get_daily_candles(market, count, to)
+    if tf == "1w":  # 주봉 (차트 5년용). 키는 그 주가 시작한 날 (UTC)
+        params = {"market": market, "count": min(count, 200)}
+        if to:
+            params["to"] = f"{to}T00:00:00"
+        return [{"day": raw["candle_date_time_utc"][:10], "open": float(raw["opening_price"]),
+                 "high": float(raw["high_price"]), "low": float(raw["low_price"]), "close": float(raw["trade_price"]),
+                 "volume": float(raw.get("candle_acc_trade_volume") or 0)}
+                for raw in _get("/candles/weeks", params)]
     params = {"market": market, "count": min(count, 200)}
     if to:
         params["to"] = f"{to}:00"  # UTC 기준

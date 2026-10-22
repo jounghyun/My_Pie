@@ -810,6 +810,26 @@ class WebTest(TempDbTest):
         self.assertEqual(st["streak"], {"kind": "win", "count": 1})
         self.assertEqual(st["by_market"]["KRW-BTC"], {"round_trips": 2, "wins": 2, "realized": 1300.0})
 
+    def test_coin_chart_picks_candles_by_range(self):
+        calls = []
+
+        def fake_candles(market, tf, count, to=None):  # 최신순, to가 있으면 그 전 것만
+            calls.append((tf, count, to))
+            start = datetime(2026, 10, 22) - timedelta(days=0 if to is None else (datetime(2026, 10, 22) - datetime.fromisoformat(to)).days)
+            first = 0 if to is None else 1
+            return [candle((start - timedelta(days=i)).strftime("%Y-%m-%d"), 1, 2, 0.5, 1.5) for i in range(first, first + count)]
+
+        web._chart_cache.clear()
+        with mock.patch("mypie.upbit.get_candles", side_effect=fake_candles), mock.patch("time.sleep"):
+            chart = web.build_coin_chart(self.path, "KRW-BTC", "1y")
+            self.assertEqual((chart["tf"], len(chart["candles"])), ("1d", 365))           # 1년 = 일봉 365개
+            self.assertEqual([c[1] for c in calls], [200, 165])                         # 200개씩 거슬러 받음
+            self.assertLess(chart["candles"][0]["day"], chart["candles"][-1]["day"])   # 오래된 것 → 최신
+            self.assertEqual(web.build_coin_chart(self.path, "KRW-BTC", "1h")["tf"], "1m")
+            self.assertEqual(web.build_coin_chart(self.path, "KRW-BTC", "5y")["tf"], "1w")
+            self.assertIn("message", web.build_coin_chart(self.path, "KRW-BTC", "2y"))
+        web._chart_cache.clear()
+
     def test_system_and_candles_endpoints_answer(self):
         self.assertIn("disk_total_gb", web.build_system(self.path))
         self.db.set_state("status", {"mode": "paper"})

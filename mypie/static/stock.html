@@ -141,9 +141,10 @@
   <!-- 가격 차트 -->
   <section class="card" id="chart">
     <h2><span class="ico">📈</span>가격 차트 <small id="chartSub">일봉 · ▲매수 ▼매도</small>
-      <span class="right seg" id="rangeSeg">
-        <button type="button" data-span="1d">1일</button><button type="button" data-span="1w">1주</button><button type="button" data-bars="22">1달</button><button type="button" data-bars="60">3달</button><button type="button" data-bars="120" aria-pressed="true">6달</button><button type="button" data-bars="250">1년</button>
+      <span class="right seg ranges" id="rangeSeg">
+        <button type="button" data-span="5y">5년</button><button type="button" data-bars="250">1년</button><button type="button" data-bars="120">6개월</button><button type="button" data-bars="60" aria-pressed="true">3달</button><button type="button" data-bars="22">1개월</button><button type="button" data-span="1w">1주</button><button type="button" data-span="1d">1일</button><button type="button" data-span="1h">1시간</button>
       </span>
+      <select class="range-select" id="rangeSel" aria-label="차트 기간"></select>
     </h2>
     <div class="pills" id="chartPills"></div>
     <div class="chart-box" id="candleBox"><div class="empty">종목 계좌를 만들면 보여요</div></div>
@@ -267,7 +268,7 @@ function fmtGuide(text) {
   return (text || '').replace(/\{(N:(\d+)|prev|cur|next|hold)\}/g, (_, t, n) => n ? `${n}거래일` : words[t]);
 }
 
-const S = { data: null, offset: 0, sel: null, bars: 120, span: null, candles: null, sim: null, simSel: null, simSeq: 0,
+const S = { data: null, offset: 0, sel: null, bars: 60, span: null, candles: null, sim: null, simSel: null, simSeq: 0,
             pin: '', open: {}, seen: null, mine: {}, add: null, guidesDone: false, requested: {} };
 const SIM_BASE = 1e6;
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -642,11 +643,19 @@ function selectSymbol(sym) {
 }
 $('rangeSeg').addEventListener('click', (ev) => {
   const b = ev.target.closest('button'); if (!b) return;
-  S.span = b.dataset.span || null;  // 1일·1주는 분봉, 나머지는 일봉 개수
+  S.span = b.dataset.span || null;  // 1시간·1일·1주는 분봉, 5년은 주봉, 나머지는 일봉 개수
   if (b.dataset.bars) S.bars = +b.dataset.bars;
   for (const x of $('rangeSeg').children) x.setAttribute('aria-pressed', x === b);
   refreshCandles();
 });
+// 폰에서 보이는 차트 기간 콤보: 버튼과 같은 목록이고, 고르면 그 버튼을 누른 것과 같다
+(() => {
+  const seg = $('rangeSeg'), sel = $('rangeSel'), buttons = [...seg.children];
+  buttons.forEach((b, i) => sel.append(el('option', { value: i, text: b.textContent })));
+  sel.value = buttons.findIndex(b => b.getAttribute('aria-pressed') === 'true');
+  sel.onchange = () => buttons[+sel.value].click();
+  seg.addEventListener('click', (ev) => { const b = ev.target.closest('button'); if (b) sel.value = buttons.indexOf(b); });
+})();
 async function refreshCandles() {
   if (!S.sel) return;
   const sym = S.sel;
@@ -658,7 +667,7 @@ function renderCandles() {
   if (!c) return;
   const x0 = slotOf(c.symbol), rows = (c.candles || []).slice();
   const s = S.data.status;
-  if (!c.intraday && x0 && x0.price && s && rows.length && rows[rows.length - 1].day < s.today && ['open', 'closing', 'after'].includes(s.session)) {
+  if (!c.intraday && !c.weekly && x0 && x0.price && s && rows.length && rows[rows.length - 1].day < s.today && ['open', 'closing', 'after'].includes(s.session)) {
     const prev = rows[rows.length - 1].close;  // 오늘 진행 중인 봉 (시가는 전날 종가로 대신). 분봉은 진행 중인 봉까지 받아 온다
     rows.push({ day: s.today, open: prev, high: Math.max(prev, x0.price), low: Math.min(prev, x0.price), close: x0.price, volume: 0, live: true });
   }
@@ -669,14 +678,20 @@ function renderCandles() {
     if (!c.intraday) requestRanking(c.symbol);
     return;
   }
-  // 1일은 시각만, 1주는 날짜와 시각, 일봉은 날짜
-  const label = (key) => !c.intraday ? key.slice(5) : c.span === '1d' ? key.slice(11) : `${key.slice(5, 10)} ${key.slice(11)}`;
+  // 1시간·1일은 시각만, 1주는 날짜와 시각, 일봉은 날짜, 주봉은 연.월
+  const label = (key) => c.weekly ? `${key.slice(2, 4)}.${key.slice(5, 7)}` : !c.intraday ? key.slice(5)
+    : c.span === '1w' ? `${key.slice(5, 10)} ${key.slice(11)}` : key.slice(11);
   const tradeKey = (tsStr) => {  // 매매 시각 → 그 매매가 들어간 봉의 키
+    if (c.weekly) {  // 주봉 키 = 그 주 월요일
+      const d = new Date(tsStr.slice(0, 10) + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7);
+      return d.toISOString().slice(0, 10);
+    }
     if (!c.intraday) return tsStr.slice(0, 10);
     const [h, m] = tsStr.slice(11, 16).split(":").map(Number), mins = Math.floor((h * 60 + m - 480) / c.minutes) * c.minutes + 480;  // 08:00부터 자른 봉
     return `${tsStr.slice(0, 10)}T${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
   };
-  $('chartSub').textContent = `${c.intraday ? c.minutes + '분봉' : '일봉'} · ▲매수 ▼매도`;
+  $('chartSub').textContent = `${c.weekly ? '주봉' : c.intraday ? c.minutes + '분봉' : '일봉'} · ▲매수 ▼매도`;
   const W = Math.max(320, box.clientWidth), H = W < 600 ? 260 : 320, padR = 70, padT = 10, volH = 40, gap = 10;
   const priceH = H - volH - gap - 22;
   const levels = [];
@@ -733,9 +748,9 @@ function renderCandles() {
     cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('opacity', .7);
     const prev = rows[i - 1], chg = prev ? (r.close / prev.close - 1) * 100 : null;
     tip.innerHTML = '';
-    tip.append(el('b', { text: (c.intraday ? r.day.replace('T', ' ') + ' 시작' : r.day) + (r.live ? ' (진행 중)' : '') }), el('div', { text: `시가 ${won(r.open)} · 고가 ${won(r.high)}` }),
+    tip.append(el('b', { text: (c.intraday ? r.day.replace('T', ' ') + ' 시작' : c.weekly ? r.day + ' 주' : r.day) + (r.live ? ' (진행 중)' : '') }), el('div', { text: `시가 ${won(r.open)} · 고가 ${won(r.high)}` }),
                el('div', { text: `저가 ${won(r.low)} · 종가 ${won(r.close)}` }));
-    if (chg != null) { const d = el('div', { text: `${c.intraday ? '직전 봉' : '전날'} 대비 ${pct(chg)}` }); tone(d, chg); tip.append(d); }
+    if (chg != null) { const d = el('div', { text: `${c.intraday ? '직전 봉' : c.weekly ? '전 주' : '전날'} 대비 ${pct(chg)}` }); tone(d, chg); tip.append(d); }
     tip.hidden = false;
     tip.style.left = Math.min(x(i) * rect.width / W + 12, rect.width - 190) + 'px'; tip.style.top = '10px';
   });

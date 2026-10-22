@@ -457,6 +457,26 @@ class StockWebTest(TempDb):
         with mock.patch("mypie.toss.load_credentials", return_value=None):
             self.assertIn("키", web.build_stock_intraday(self.stock_path, "005930", "1w")["message"])
 
+    def test_five_year_chart_groups_days_into_weeks(self):
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def daily_candles(self, symbol, count, before=None):
+                days = [datetime(2026, 10, 23) - timedelta(days=i) for i in range(10)]  # 10/14(수)~10/23(금)
+                rows = [candle(d.strftime("%Y-%m-%d"), 100 + i, 110 + i, 90 + i, 105 + i)
+                        for i, d in enumerate(days) if d.weekday() < 5]
+                return [r for r in rows if not before or r["day"] < before][:count]
+
+        web._chart_cache.clear()
+        with mock.patch("mypie.toss.load_credentials", return_value=("a", "b", "1")), \
+             mock.patch("mypie.toss.TossClient", FakeClient):
+            chart = web.build_stock_weekly(self.stock_path, "005930")
+        web._chart_cache.clear()
+        self.assertEqual([c["day"] for c in chart["candles"]], ["2026-10-12", "2026-10-19"])  # 주의 키 = 월요일
+        week = chart["candles"][1]                                       # 10/19(월)~10/23(금)
+        self.assertEqual((week["open"], week["close"], week["high"], week["low"]), (104, 105, 114, 90))
+
     def test_search_payload_and_simulation(self):
         self.db.set_state("stocks", {"day": DAY1, "list": [{"symbol": "005930", "name": "삼성전자", "market": "KOSPI"},
                                                            {"symbol": "005935", "name": "삼성전자우", "market": "KOSPI"},
