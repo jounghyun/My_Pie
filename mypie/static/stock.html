@@ -43,7 +43,7 @@
       </div>
       <nav class="jump">
         <a href="#overview">개요</a><a href="#slots">종목 계좌</a><a href="#chart">차트</a><a href="#sim">시뮬레이션</a>
-        <a href="#settings">계좌 설정</a><a href="#guides">전략 설명</a><a href="#history">기록</a>
+        <a href="#settings">계좌 설정</a><a href="#guides">전략 설명</a><a href="#history">기록</a><a href="#system">라즈베리파이</a>
       </nav>
     </div>
   </div>
@@ -200,10 +200,13 @@
       <ul class="events" id="events"></ul>
     </section>
   </div>
+
+  <section class="card" id="system"></section><!-- 라즈베리파이 상태: /pi.js가 채운다 -->
 </div>
 <div id="toasts" class="toasts"></div>
 
 <script src="/rules.js"></script>
+<script src="/pi.js"></script>
 <script>
 // ---------- 도우미 ----------
 const $ = (id) => document.getElementById(id);

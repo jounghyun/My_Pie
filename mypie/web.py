@@ -1057,7 +1057,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlparse(self.path)
         route, query = url.path, parse_qs(url.query)
-        if route in ("/app.css", "/rules.js"):  # 화면 모양·도우미뿐인 공용 파일이라 로그인 전에도 준다
+        if route in ("/app.css", "/rules.js", "/pi.js"):  # 화면 모양·도우미뿐인 공용 파일이라 로그인 전에도 준다
             kind = "text/css" if route.endswith(".css") else "text/javascript"
             self._send(200, (STATIC_DIR / route[1:]).read_bytes(), kind + "; charset=utf-8")
             return
