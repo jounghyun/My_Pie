@@ -906,6 +906,13 @@ class WebTest(TempDbTest):
             self.assertIn("message", web.build_coin_chart(self.path, "KRW-BTC", "2y"))
         web._chart_cache.clear()
 
+    def test_power_is_estimated_from_cpu_use(self):
+        p = web._power("Raspberry Pi 3 Model B Rev 1.2", 0.5)
+        self.assertAlmostEqual(p["power_w"], 1.4 + (3.7 - 1.4) * 0.5)
+        self.assertEqual(p["power_w_recommended"], 12.5)
+        self.assertAlmostEqual(web._power("Raspberry Pi 3 Model B Plus Rev 1.3", 0.0)["power_w"], 1.9)  # 3B+는 따로
+        self.assertEqual(web._power("Some PC", 0.5), {})                 # 모르는 기기는 보여주지 않는다
+
     def test_system_and_candles_endpoints_answer(self):
         self.assertIn("disk_total_gb", web.build_system(self.path))
         self.db.set_state("status", {"mode": "paper"})

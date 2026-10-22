@@ -629,9 +629,40 @@ def _read(path: str) -> str | None:
         return None
 
 
+# 파이 3B에는 전력 센서가 없어서 CPU 사용률로 어림한다: 모델 → (쉴 때 W, 4코어 다 쓸 때 W, 권장 어댑터 W)
+# 쉴 때·다 쓸 때는 5V에서 잰 전류로 알려진 값 (3B 260→730mA, 3B+ 350→980mA), 권장은 공식 5.1V 2.5A
+POWER_MODELS = [("Raspberry Pi 3 Model B Plus", 1.9, 5.1, 12.5), ("Raspberry Pi 3 Model B", 1.4, 3.7, 12.5)]
+_cpu_last: tuple[int, int] | None = None  # 지난번 /proc/stat (쉰 시간, 전체 시간)
+
+
+def _cpu_busy() -> float | None:
+    """CPU 사용률 0~1. 지난번 부른 뒤로의 /proc/stat 차이, 처음이면 1분 평균 부하로 대신."""
+    global _cpu_last
+    stat = _read("/proc/stat")
+    if not stat:
+        return None
+    fields = [int(v) for v in stat.splitlines()[0].split()[1:9]]
+    idle, total = fields[3] + fields[4], sum(fields)
+    prev, _cpu_last = _cpu_last, (idle, total)
+    if prev and total > prev[1]:
+        return max(0.0, min(1.0, 1 - (idle - prev[0]) / (total - prev[1])))
+    try:
+        return min(1.0, os.getloadavg()[0] / (os.cpu_count() or 1))
+    except OSError:
+        return None
+
+
+def _power(model: str | None, busy: float | None) -> dict:
+    for name, idle_w, full_w, recommended_w in POWER_MODELS:
+        if model and model.startswith(name) and busy is not None:
+            return {"power_w": idle_w + (full_w - idle_w) * busy, "power_w_recommended": recommended_w}
+    return {}
+
+
 def build_system(db_path: str) -> dict:
     """라즈베리파이 상태. 파이가 아닌 곳에서는 알 수 있는 것만."""
     info: dict = {"server_time": ts()}
+    info.update(_power((_read("/proc/device-tree/model") or "").rstrip("\x00"), _cpu_busy()))
     temp = _read("/sys/class/thermal/thermal_zone0/temp")
     if temp and temp.isdigit():
         info["temp_c"] = int(temp) / 1000

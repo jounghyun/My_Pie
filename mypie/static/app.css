@@ -266,8 +266,8 @@
   .mover .n small { color: var(--muted); margin-left: 4px; }
 
   /* 시스템 */
-  .sys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-  @media (max-width: 760px) { .sys { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .sys { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+  @media (max-width: 760px) { .sys { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sys .power { grid-column: 1 / -1; } }
   .meter { height: 7px; background: var(--soft); border-radius: 4px; overflow: hidden; margin-top: 8px; }
   .meter i { display: block; height: 100%; border-radius: 4px; background: var(--ok); transition: width .6s; }
 

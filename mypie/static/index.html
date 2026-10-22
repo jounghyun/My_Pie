@@ -259,6 +259,8 @@
       <div class="tile"><div class="label">CPU 사용</div><div class="v num" id="sysLoad">-</div><div class="meter"><i id="sysLoadBar"></i></div></div>
       <div class="tile"><div class="label">메모리</div><div class="v num" id="sysMem">-</div><div class="meter"><i id="sysMemBar"></i></div></div>
       <div class="tile"><div class="label">저장공간</div><div class="v num" id="sysDisk">-</div><div class="meter"><i id="sysDiskBar"></i></div></div>
+      <div class="tile power" title="파이 3B에는 전력 센서가 없어서 CPU 사용량으로 어림한 값이에요"><div class="label">전력 (추정)</div>
+        <div class="v num" id="sysPower">-</div><div class="sub" id="sysPowerSub"></div><div class="meter"><i id="sysPowerBar"></i></div></div>
     </div>
     <div class="desc" id="sysFoot"></div>
   </section>
@@ -1359,6 +1361,13 @@ function renderSystem() {
   if (x.load != null) { const r = x.load / (x.cpus || 1); $('sysLoad').textContent = Math.round(r * 100) + '%'; meter('sysLoadBar', r); }
   if (x.mem_total_mb) { $('sysMem').textContent = `${x.mem_used_mb} / ${x.mem_total_mb}MB`; meter('sysMemBar', x.mem_used_mb / x.mem_total_mb); }
   if (x.disk_total_gb) { $('sysDisk').textContent = `${x.disk_used_gb.toFixed(1)} / ${x.disk_total_gb.toFixed(0)}GB`; meter('sysDiskBar', x.disk_used_gb / x.disk_total_gb); }
+  if (x.power_w != null) {  // 막대 끝 = 권장 어댑터. 색은 전압 상태 (W가 작아도 전압이 모자라면 빨강)
+    const rec = x.power_w_recommended;
+    $('sysPower').textContent = `약 ${x.power_w.toFixed(1)}W`;
+    $('sysPowerSub').textContent = `권장 어댑터 ${rec}W (5V ${(rec / 5).toFixed(1)}A)` + (x.undervoltage_now ? ' · 지금 전압 부족' : '');
+    meter('sysPowerBar', x.power_w / rec);
+    $('sysPowerBar').style.background = x.undervoltage_now ? 'var(--bad)' : x.undervoltage_ever ? 'var(--warn)' : 'var(--ok)';
+  }
   const up = x.uptime_sec;
   $('sysSub').textContent = up != null ? `켜진 지 ${up >= 86400 ? Math.floor(up / 86400) + '일 ' : ''}${Math.floor(up % 86400 / 3600)}시간 ${Math.floor(up % 3600 / 60)}분` : '';
   const notes = [];
