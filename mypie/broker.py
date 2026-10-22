@@ -104,7 +104,7 @@ class Book:
         self.save()
 
     def set_closing(self, sid: str, on: bool) -> None:
-        """'팔고 지우기': 켜 두면 봇이 이 계좌 코인을 다 팔고 지운다 (그동안은 새로 사지 않는다)."""
+        """'팔고 빼기': 켜 두면 봇이 이 계좌 코인을 다 팔고, 원화를 금고로 빼고 지운다 (그동안은 새로 사지 않는다)."""
         s = self.slot(sid)
         if on:
             s["closing"] = True
@@ -121,7 +121,7 @@ class Book:
         """코인이 없을 때만 지운다. 남은 원화는 금고로. 옮긴 금액을 돌려준다."""
         s = self.slot(sid)
         if s["coin"] > 0:
-            raise VaultError("코인이 남아 있어서 지울 수 없어요. '팔고 지우기'를 써 주세요")
+            raise VaultError("코인이 남아 있어서 지울 수 없어요. '팔고 빼기'를 써 주세요")
         self.data["vault"] += s["krw"]
         del self.data["slots"][sid]
         self.save()

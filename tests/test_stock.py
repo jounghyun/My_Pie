@@ -301,7 +301,7 @@ class StockBotTest(TempDb):
         self.request(4, action="close", slot=sid)
         bot.step(at(DAY1, "15:40"))                                      # 장 마감 뒤: 표시만 해 두고
         self.assertTrue(self.slot(bot)["closing"])
-        self.assertIn("다음 장 시작(09:00)에 팔고 지워요", self.db.get_state("status")["slots"][0]["state_text"])
+        self.assertIn("다음 장 시작(09:00)에 팔고 빼요", self.db.get_state("status")["slots"][0]["state_text"])
         self.request(5, action="cancel_close", slot=sid)                 # 취소하면 다시 전략대로
         bot.step(at(DAY1, "15:41"))
         self.assertNotIn("closing", self.slot(bot))

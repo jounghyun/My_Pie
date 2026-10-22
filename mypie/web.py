@@ -751,7 +751,7 @@ COIN_ACTIONS = ("add", "remove", "close", "cancel_close", "strategy", "transfer"
 
 
 def request_coin(db_path: str, data: dict) -> tuple[int, dict]:
-    """코인 봇에게 보내는 요청 (코인 계좌 만들기·지우기·팔고 지우기·전략 변경·금고 이체·계좌 전환·가상 입출금).
+    """코인 봇에게 보내는 요청 (코인 계좌 만들기·지우기·팔고 빼기·전략 변경·금고 이체·계좌 전환·가상 입출금).
     PIN이 필요하다. 주식 봇의 request_stock과 같은 모양."""
     action = str(data.get("action", ""))
     if action not in COIN_ACTIONS:

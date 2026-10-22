@@ -495,7 +495,7 @@ function renderSlots(s) {
     const t = ticker(x.market), rate = t ? (x.price / t.prev_close - 1) * 100 : null;
     const card = el('div', { class: 'card slot-card' + (x.rank_key === S.sel ? ' sel' : ''), title: '눌러서 이 종목의 차트·순위 보기' });
     card.append(el('div', { class: 'bar', style: `background:${slotColor(i)}` }));
-    const chip = x.closing ? '🧹 팔고 지우는 중' : x.holding ? '🟢 보유' : x.book.krw >= (S.data.min_order || 5000) ? '⏳ 대기' : '👀 지켜보기';
+    const chip = x.closing ? '🧹 팔고 빼는 중' : x.holding ? '🟢 보유' : x.book.krw >= (S.data.min_order || 5000) ? '⏳ 대기' : '👀 지켜보기';
     const head = el('div', { class: 'slot-head' },
       el('div', { class: 'slot-name' }, x.name, el('small', { text: sym(x.market) })), el('span', { class: 'chip', text: chip }));
     const nextMs = parseTs(x.next_at).getTime() - (Date.now() + S.offset);
@@ -520,7 +520,7 @@ function renderSlots(s) {
     // 넣기·빼기·전략 바꾸기·지우기 (누르면 카드 아래에 칸이 열린다)
     const acts = el('div', { class: 'slot-actions' }), panel = el('div');
     const open = (kind) => { S.open = S.open.slot === x.id && S.open.kind === kind ? {} : { slot: x.id, kind }; renderSlots(S.data.status); };
-    const removeLabel = x.closing ? '팔고 지우기 취소' : x.holding ? '팔고 지우기' : '지우기';
+    const removeLabel = x.closing ? '팔고 빼기 취소' : hasMoney(x) ? '팔고 빼기' : '지우기';
     for (const [kind, label, cls] of [['in', '🏦→ 넣기', ''], ['out', '→🏦 빼기', 'ghost'], ['strategy', '전략 바꾸기', 'ghost'], ['remove', removeLabel, 'ghost']]) {
       const b = el('button', { type: 'button', class: cls, text: label });
       b.onclick = (ev) => { ev.stopPropagation(); open(kind); };
@@ -820,7 +820,10 @@ async function requestRanking(market, tf = '1d', refresh = false) {  // refresh:
   try { await postJSON('/api/ranking', { market, tf }); } catch (e) {}
 }
 
-// ---------- 코인 계좌 카드의 버튼 칸 (넣기·빼기·전략 바꾸기·지우기) ----------
+// ---------- 코인 계좌 카드의 버튼 칸 (넣기·빼기·전략 바꾸기·팔고 빼기/지우기) ----------
+// 원화나 코인이 있으면 '팔고 빼기', 하나도 없으면(지켜보기) '지우기'
+const hasMoney = (x) => x.holding || x.book.krw >= 1;
+
 function slotPanel(x, kind) {
   const p = el('div', { class: 'panel' }), row = el('div', { class: 'row' }), pin = pinField();
   const close = () => { S.open = {}; renderSlots(S.data.status); };
@@ -850,17 +853,20 @@ function slotPanel(x, kind) {
     row.append(pin, go);
     p.append(el('label', { class: 'hint' }, '판단 주기 ', ts_), rb, stop, row,
              el('span', { class: 'hint', text: '들고 있는 코인은 팔지 않고, 새 전략이 다음 봉부터 판단해요. 손절선은 산 값보다 정한 만큼 떨어지면 바로 팔아요.' }));
-  } else {  // 지우기: 코인이 있으면 '팔고 지우기' (바로 다 판 뒤에 지운다)
-    const action = x.closing ? 'cancel_close' : x.holding ? 'close' : 'remove';
-    const go = el('button', { type: 'button', class: 'primary', text: x.closing ? '팔고 지우기 취소' : x.holding ? '팔고 지우기' : '지우기' });
+  } else {  // 팔고 빼기: 코인을 바로 다 판 뒤에 원화를 금고로 빼고 지운다 · 돈이 없으면 그냥 지우기
+    const money = hasMoney(x);
+    const action = x.closing ? 'cancel_close' : money ? 'close' : 'remove';
+    const go = el('button', { type: 'button', class: 'primary', text: x.closing ? '팔고 빼기 취소' : money ? '팔고 빼기' : '지우기' });
     go.onclick = () => {
-      if (action === 'close' && !confirm(`${x.name}: 코인을 지금 시장가로 다 팔고 계좌를 지울까요?` + (S.data.status.mode === 'live' ? '\n\n⚠️ 실제 돈으로 업비트에 매도 주문이 나가요.' : ''))) return;
+      if (action === 'close' && x.holding && !confirm(`${x.name}: 코인을 지금 시장가로 다 팔고, 원화를 금고로 뺀 뒤 계좌를 지울까요?`
+                                                      + (S.data.status.mode === 'live' ? '\n\n⚠️ 실제 돈으로 업비트에 매도 주문이 나가요.' : ''))) return;
       send({ action, slot: x.id }, pin, close);
     };
     row.append(pin, go);
     p.append(row, el('span', { class: 'hint', text: x.closing ? '취소하면 지우지 않고 다시 전략대로 사고팔아요.'
-      : x.holding ? '들고 있는 코인을 바로 다 팔고 나서 지워요. 판 돈과 원화는 금고로 옮겨요.'
-      : `원화 ${won(x.book.krw)}은 금고로 옮기고 지워요.` }));
+      : x.holding ? '들고 있는 코인을 바로 다 팔고, 판 돈과 원화를 금고로 뺀 뒤 계좌를 지워요.'
+      : money ? `원화 ${won(x.book.krw)}을(를) 금고로 빼고 계좌를 지워요.`
+      : '돈도 코인도 없는 계좌(지켜보기)라 바로 지워요.' }));
   }
   p.onclick = (ev) => ev.stopPropagation();
   return p;

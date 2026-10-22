@@ -103,14 +103,14 @@ class VaultBook:
         """주식이 없을 때만 지운다. 남은 잔액은 금고로. 옮긴 금액을 돌려준다."""
         s = self.slot(sid)
         if s["qty"] > 0:
-            raise VaultError(f"주식이 {s['qty']:,}주 남아 있어서 지울 수 없어요. 전부 판 뒤에 지워 주세요")
+            raise VaultError(f"주식이 {s['qty']:,}주 남아 있어서 지울 수 없어요. '팔고 빼기'를 써 주세요")
         self.data["vault"] += s["cash"]
         del self.data["slots"][sid]
         self.save()
         return s["cash"]
 
     def set_closing(self, sid: str, on: bool) -> None:
-        """'팔고 지우기': 켜 두면 봇이 장중에 이 계좌 주식을 다 팔고 지운다 (그동안은 새로 사지 않는다)."""
+        """'팔고 빼기': 켜 두면 봇이 장중에 이 계좌 주식을 다 팔고, 잔액을 금고로 빼고 지운다 (그동안은 새로 사지 않는다)."""
         s = self.slot(sid)
         if on:
             s["closing"] = True

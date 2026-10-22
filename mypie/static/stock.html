@@ -385,7 +385,7 @@ function renderSlots(s) {
     if (x.change_rate != null) { const b = el('span', { class: 'badge', text: pct(x.change_rate) }); tone(b, x.change_rate); b.classList.add(x.change_rate > 0 ? 'up' : x.change_rate < 0 ? 'down' : 'x'); price.append(b); }
     card.append(price, el('div', { class: 'slot-strat' }, el('b', { text: '🧠 ' + x.strategy.label }),
                                    x.stop_loss > 0 ? el('span', { class: 'tag stop', text: '🛑 ' + stopText(x.stop_loss) }) : '',
-                                   x.closing ? el('span', { class: 'tag stop', text: '🧹 팔고 지우는 중' }) : '', ' ' + planLine(x)),
+                                   x.closing ? el('span', { class: 'tag stop', text: '🧹 팔고 빼는 중' }) : '', ' ' + planLine(x)),
                 el('div', { class: 'slot-state', text: (x.holding ? '🟢 ' : '⏳ ') + x.state_text }));
     const ret = el('div', { class: 'v num', text: pct(x.return_pct) }); tone(ret, x.return_pct);
     const unr = el('div', { class: 'v num', text: x.holding ? signedWon(x.unrealized) : won(x.value) }); tone(unr, x.unrealized);
@@ -399,7 +399,7 @@ function renderSlots(s) {
     const acts = el('div', { class: 'slot-actions' });
     const panel = el('div');
     const open = (kind) => { S.open = S.open.slot === x.id && S.open.kind === kind ? {} : { slot: x.id, kind }; renderSlots(S.data.status); };
-    const removeLabel = x.closing ? '팔고 지우기 취소' : x.qty > 0 ? '팔고 지우기' : '지우기';
+    const removeLabel = x.closing ? '팔고 빼기 취소' : hasMoney(x) ? '팔고 빼기' : '지우기';
     for (const [kind, label, cls] of [['in', '🏦→ 넣기', ''], ['out', '→🏦 빼기', 'ghost'], ['strategy', '전략 바꾸기', 'ghost'], ['remove', removeLabel, 'ghost']]) {
       const b = el('button', { type: 'button', class: cls, text: label });
       b.onclick = (ev) => { ev.stopPropagation(); open(kind); };
@@ -414,6 +414,9 @@ function renderSlots(s) {
   add.onclick = () => { $('addBox').hidden = false; fillAddStrategies(); $('addBox').scrollIntoView({ block: 'start' }); $('addSearch').focus(); };
   box.append(add);
 }
+// 잔액이나 주식이 있으면 '팔고 빼기', 하나도 없으면(지켜보기) '지우기'
+const hasMoney = (x) => x.qty > 0 || x.cash >= 1;
+
 function slotPanel(x, kind) {
   const p = el('div', { class: 'panel' }), row = el('div', { class: 'row' }), pin = pinField();
   const close = () => { S.open = {}; renderSlots(S.data.status); };
@@ -442,15 +445,17 @@ function slotPanel(x, kind) {
     row.append(pin, go);
     p.append(rb, stop, row, el('span', { class: 'hint', text: '들고 있는 주식은 팔지 않고, 새 전략이 바로(장중) 또는 다음 장 시작에 판단해요. '
                                                                + '손절선은 산 값보다 정한 만큼 떨어지면 장중에 바로 팔아요.' }));
-  } else {  // 지우기: 주식이 있으면 '팔고 지우기' (장중에 다 판 뒤에 지운다)
-    const action = x.closing ? 'cancel_close' : x.qty > 0 ? 'close' : 'remove';
-    const go = el('button', { type: 'button', class: 'primary', text: x.closing ? '팔고 지우기 취소' : x.qty > 0 ? '팔고 지우기' : '지우기' });
+  } else {  // 팔고 빼기: 장중에 주식을 다 판 뒤에 잔액을 금고로 빼고 지운다 · 돈이 없으면 그냥 지우기
+    const money = hasMoney(x);
+    const action = x.closing ? 'cancel_close' : money ? 'close' : 'remove';
+    const go = el('button', { type: 'button', class: 'primary', text: x.closing ? '팔고 빼기 취소' : money ? '팔고 빼기' : '지우기' });
     go.onclick = () => send({ action, slot: x.id }, pin, close);
     row.append(pin, go);
     p.append(row, el('span', { class: 'hint', text: x.closing ? '취소하면 지우지 않고 다시 전략대로 사고팔아요.'
-      : x.qty > 0 ? `주식 ${x.qty}주를 판 뒤에 지워요. 장중이면 바로, 장이 닫혀 있으면 다음 장 시작(09:00)에 팔아요. `
-                    + '그동안은 새로 사지 않고, 판 돈과 잔액은 금고로 옮겨요.'
-      : `잔액 ${won(x.cash)}은 금고로 옮기고 지워요.` }));
+      : x.qty > 0 ? `주식 ${x.qty}주를 판 뒤에 판 돈과 잔액을 금고로 빼고 계좌를 지워요. `
+                    + '장중이면 바로, 장이 닫혀 있으면 다음 장 시작(09:00)에 팔아요. 그동안은 새로 사지 않아요.'
+      : money ? `잔액 ${won(x.cash)}을(를) 금고로 빼고 계좌를 지워요.`
+      : '돈도 주식도 없는 계좌(지켜보기)라 바로 지워요.' }));
   }
   p.onclick = (ev) => ev.stopPropagation();
   return p;

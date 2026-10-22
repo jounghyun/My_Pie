@@ -670,7 +670,7 @@ class BotFlowTest(TempDbTest):
         self.go(bot, self.D1)
         self.assertFalse(self.results()[-1][0])                         # 코인이 있으면 그냥은 못 지운다
         self.request(5, action="close", slot=sid)
-        self.go(bot, self.D1)                                          # 팔고 지우기: 바로 팔고 지운다
+        self.go(bot, self.D1)                                          # 팔고 빼기: 바로 팔고 지운다
         self.assertEqual(self.trades()[-1], ("sell", "KRW-BTC"))
         self.assertEqual(bot.slots, [])
         self.assertAlmostEqual(bot.book.vault, bot.book.cash())         # 판 돈과 원화는 금고로
@@ -688,6 +688,19 @@ class BotFlowTest(TempDbTest):
         self.go(bot, self.D1)
         self.assertEqual(self.trades(), [("buy", "KRW-BTC")])
         self.assertFalse(bot.slots[0].closing)
+
+    def test_close_with_only_cash_moves_it_to_the_vault_at_once(self):
+        self.accounts(("a", "KRW-BTC", "buy_and_hold", 100_000), ("b", "KRW-ETH", "buy_and_hold", 0), vault=5_000)
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.request(1, action="close", slot="a")                        # 코인 없이 원화만: 바로 금고로 빼고 지운다
+        self.request(2, action="remove", slot="b")                       # 돈이 없는 계좌(지켜보기): 그냥 지우기
+        self.go(bot, self.D1)
+        self.assertEqual(self.trades(), [])
+        self.assertEqual((bot.slots, bot.book.vault), ([], 105_000))
+        self.assertEqual([ok for ok, _ in self.results()], [True, True])
+        self.assertIn("뺐어요 · 원화 100,000원은 금고로", self.results()[0][1])
+        self.assertIn("ETH 계좌를 지웠어요", self.results()[1][1])
 
     def test_same_coin_in_two_accounts(self):
         self.accounts(("a", "KRW-BTC", "buy_and_hold", 100_000), ("b", "KRW-BTC", "buy_and_hold", 50_000))

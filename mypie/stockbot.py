@@ -112,7 +112,7 @@ class StockSlot:
         self.strategy = make_rule(self.rule, lambda n: create_strategy(n, {**strategy_params(cfg, n), "_bar": "일"},
                                                                        STOCK_STRATEGIES))
         self.stop_loss = float(entry.get("stop_loss") or 0)  # 손절선 % (0이면 안 씀)
-        self.closing = bool(entry.get("closing"))  # 팔고 지우는 중
+        self.closing = bool(entry.get("closing"))  # 팔고 빼는 중
         self.plan: DayPlan | None = None
         self.plan_day: str | None = None
 
@@ -401,14 +401,14 @@ class StockBot:
             self._buy(slot, today, f"{plan.buy_stop:,.0f}원 돌파")
 
     def _close_out(self, slot: StockSlot) -> None:
-        """'팔고 지우기'를 누른 계좌: 들고 있는 주식을 팔고, 다 팔렸으면 지운다 (잔액은 금고로)."""
+        """'팔고 빼기'를 누른 계좌: 들고 있는 주식을 팔고, 다 팔렸으면 잔액을 금고로 빼고 지운다."""
         if self._holding(slot):
-            self._sell(slot, "팔고 지우기")
+            self._sell(slot, "팔고 빼기")
         if not self._holding(slot):  # 일부만 체결되면 다음 루프에서 나머지를 판다
             moved = self.book.remove_slot(slot.id)
             self._drop_sstate(slot.id)
             self._load_slots()
-            self.event("info", f"{self._tag(slot)}다 팔고 계좌를 지웠어요 · 잔액 {moved:,.0f}원은 금고로", notify=True)
+            self.event("info", f"{self._tag(slot)}다 팔고 뺐어요 · 잔액 {moved:,.0f}원은 금고로 옮기고 계좌를 지웠어요", notify=True)
 
     def _holding(self, slot: StockSlot) -> bool:
         return self.book.slot(slot.id)["qty"] > 0
@@ -587,15 +587,15 @@ class StockBot:
             moved = self.book.remove_slot(sid)
             self._drop_sstate(sid)
             self._load_slots()
-            return f"{name} 종목 계좌를 지웠어요" + (f" · 잔액 {moved:,.0f}원은 금고로" if moved else "")
-        if action == "close":  # 팔고 지우기: 주식이 있으면 장중에 다 판 뒤에 지운다
+            return f"{name} 종목 계좌를 뺐어요 · 잔액 {moved:,.0f}원은 금고로" if moved else f"{name} 종목 계좌를 지웠어요"
+        if action == "close":  # 팔고 빼기: 주식이 있으면 장중에 다 판 뒤에 잔액을 금고로 빼고 지운다
             self.book.set_closing(sid, True)
             self._load_slots()
-            return f"{name}: 주식 {self.book.slot(sid)['qty']:,}주를 팔고 나서 지워요 (장중이면 바로, 아니면 다음 장 시작에)"
+            return f"{name}: 주식 {self.book.slot(sid)['qty']:,}주를 팔고 나서 잔액을 금고로 빼고 지워요 (장중이면 바로, 아니면 다음 장 시작에)"
         if action == "cancel_close":
             self.book.set_closing(sid, False)
             self._load_slots()
-            return f"{name}: 팔고 지우기를 취소했어요 · 다시 전략대로 사고팔아요"
+            return f"{name}: 팔고 빼기를 취소했어요 · 다시 전략대로 사고팔아요"
         if action == "strategy":
             rule, problem = check_rule(r, STOCK_STRATEGIES)
             stop, stop_problem = stoploss.parse(r.get("stop_loss"))
@@ -696,7 +696,7 @@ class StockBot:
         s, plan, st = self.book.slot(slot.id), slot.plan, self._sstate(slot)
         price = self.prices.get(slot.symbol)
         if slot.closing:
-            return "팔고 지우는 중 · 장중이면 바로 팔아요" if sess == "open" else "다음 장 시작(09:00)에 팔고 지워요"
+            return "팔고 빼는 중 · 장중이면 바로 팔아요" if sess == "open" else "다음 장 시작(09:00)에 팔고 빼요"
         fresh = plan is not None and slot.plan_day == today and sess in ("open", "closing")
         if s["qty"] > 0:
             loss = self._loss_line(slot)
@@ -748,7 +748,7 @@ class StockBot:
                                  "exit_next_open": slot.strategy.exit_next_open},
                     "rule": slot.rule,  # 살 때·팔 때 전략
                     "stop_loss": slot.stop_loss, "stop_price": self._loss_line(slot),  # 손절선 (들고 있을 때만 값)
-                    "closing": slot.closing,  # 팔고 지우는 중
+                    "closing": slot.closing,  # 팔고 빼는 중
                     "plan": asdict(slot.plan) if slot.plan and slot.plan_day == today else None,
                     "state_text": self._state_text(slot, sess, today), "holding": s["qty"] > 0,
                     "cash": s["cash"], "qty": s["qty"], "avg_price": s["avg_price"], "cost": s["cost"],
