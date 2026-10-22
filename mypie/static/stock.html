@@ -363,6 +363,12 @@ function holdLine(text, n) {  // 카드의 수익률·손익 아래 '(바이앤�
   tone(d, n);
   return d;
 }
+function realizedTile(x) {  // 판 매매로 확정된 손익 (수수료·거래세 뺀 뒤): 합계 + 번 돈·잃은 돈
+  const v = el('div', { class: 'v num', text: x.sells ? signedWon(x.realized) : '0원' }); tone(v, x.realized);
+  return el('div', { class: 'tile wide', title: '판 매매로 확정된 손익이에요. 수수료와 증권거래세는 이미 뺐어요.' },
+    el('div', { class: 'label', text: x.sells ? `💰 확정 손익 · ${x.wins}승 ${x.sells - x.wins}패` : '💰 확정 손익' }), v,
+    el('div', { class: 'sub num', text: x.sells ? `(번 돈 ${signedWon(x.gains)} · 잃은 돈 ${signedWon(x.losses)})` : '(아직 판 매매가 없어요)' }));
+}
 function planLine(x) {
   const p = x.plan;
   if (!p) return '';
@@ -395,7 +401,8 @@ function renderSlots(s) {
          holdLine(x.hold_pnl == null ? null : `(${signedWon(x.hold_pnl)})`, x.hold_pnl)),
       el('div', { class: 'tile' }, el('div', { class: 'label', text: '계좌 수익률' }), ret,
          holdLine(x.hold_return_pct == null ? null : `(${pct(x.hold_return_pct)})`, x.hold_return_pct)),
-      el('div', { class: 'tile' }, el('div', { class: 'label', text: '넣은 돈' }), el('div', { class: 'v num', text: won(x.contrib) }))));
+      el('div', { class: 'tile' }, el('div', { class: 'label', text: '넣은 돈' }), el('div', { class: 'v num', text: won(x.contrib) })),
+      realizedTile(x)));
     const acts = el('div', { class: 'slot-actions' });
     const panel = el('div');
     const open = (kind) => { S.open = S.open.slot === x.id && S.open.kind === kind ? {} : { slot: x.id, kind }; renderSlots(S.data.status); };

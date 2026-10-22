@@ -312,6 +312,11 @@ class StockBotTest(TempDb):
         self.assertEqual([t[0] for t in self.trades()], ["buy", "sell"])
         s = self.slot(bot)
         self.assertEqual((s["qty"], s["cash"], "closing" in s), (0, 0, False))  # 계좌는 0원 지켜보기로 남는다
+        sold = self.db.trades("paper")[-1]
+        card = self.db.get_state("status")["slots"][0]
+        self.assertEqual((card["sells"], card["wins"]), (1, 1))         # 계좌별 확정 손익 (수수료·거래세 뺀 뒤)
+        self.assertAlmostEqual(card["realized"], sold["profit"])
+        self.assertEqual((card["gains"], card["losses"]), (card["realized"], 0))
         self.assertGreater(bot.book.vault, 1_000_000)                    # 판 돈과 잔액은 금고로
         self.request(7, action="remove", slot=sid)
         bot.step(at(DAY2, "09:02"))

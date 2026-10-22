@@ -128,6 +128,7 @@
   .slot-state { font-size: 13px; color: var(--muted); margin-top: 2px; }
   .slot-when { font-size: 12.5px; color: var(--muted); margin-top: 6px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
   .slot-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .slot-foot .tile.wide { grid-column: 1 / -1; }
   .wbar { height: 6px; border-radius: 3px; background: var(--soft); margin-top: 10px; position: relative; overflow: hidden; }
   .wbar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
   .wbar b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); opacity: .5; }

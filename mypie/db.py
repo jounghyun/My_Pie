@@ -162,6 +162,13 @@ class Database:
                               (mode, market, since))
         return self._rows("SELECT * FROM trades WHERE mode = ? AND ts >= ? ORDER BY id", (mode, since))
 
+    def slot_profits(self, mode: str) -> dict[str, dict]:
+        """계좌별 확정 손익 (판 매매만, 수수료·세금 뺀 뒤): {계좌: {realized, gains, losses, sells, wins}}."""
+        rows = self._rows("SELECT slot, SUM(profit) AS realized, SUM(MAX(profit, 0)) AS gains, "
+                          "SUM(MIN(profit, 0)) AS losses, COUNT(*) AS sells, SUM(profit > 0) AS wins "
+                          "FROM trades WHERE mode = ? AND side = 'sell' AND slot IS NOT NULL GROUP BY slot", (mode,))
+        return {r["slot"]: r for r in rows}
+
     def recent_trades(self, limit: int = 30) -> list[dict]:
         return self._rows("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,))
 

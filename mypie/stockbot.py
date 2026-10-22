@@ -744,6 +744,7 @@ class StockBot:
                   "ip_error": self.ip_error, "slots": [], "account": None, "broker": self.broker or None}
         if self.book is not None:
             slots, changed = [], False
+            profits = self.db.slot_profits(self.executor.mode)
             for slot in self.slots:
                 s = self.book.slot(slot.id)
                 q = self.quotes.get(slot.symbol) or {}
@@ -775,6 +776,8 @@ class StockBot:
                     "hold_pnl": hold_value - s["contrib"] if hold_value is not None else None,
                     "unrealized": value - s["cost"] if s["qty"] else None,
                     "unrealized_pct": (value / s["cost"] - 1) * 100 if s["qty"] and s["cost"] > 0 else None,
+                    # 판 매매로 확정된 손익 (수수료·거래세 뺀 뒤): 합계, 번 돈, 잃은 돈, 판 횟수, 이긴 횟수
+                    **{k: (profits.get(slot.id) or {}).get(k) or 0 for k in ("realized", "gains", "losses", "sells", "wins")},
                 })
             if changed:
                 self.book.save()
