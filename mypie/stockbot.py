@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import backtest, buyhold, krx, stoploss, telegram, toss
@@ -76,6 +76,32 @@ def sync_daily(db: Database, client, symbol: str, wanted: int, today: str) -> No
         oldest = new_oldest
 
 
+REGULAR_TF = "1dk"          # 정규장(09:00~15:30) 일봉. 판단·순위·시뮬레이션은 모두 이걸로 한다 (봇은 정규장에서만 사고판다)
+REGULAR_BUDGET = {True: 5, False: 40}  # 한 루프에 1분봉으로 다시 만드는 날 수 (장중이면 조금씩: 루프가 오래 멈추지 않게)
+
+
+def sync_regular(db: Database, client, symbol: str, nxt: bool, today: str, budget: int) -> bool:
+    """정규장 일봉을 일봉('1d')에 맞춰 채운다. NXT 종목의 NXT 개장일 뒤 날짜만 1분봉으로 다시 만들고
+    (토스증권 일봉이 08:00~20:00을 합친 값이라), 그 전 날짜와 NXT가 아닌 종목은 그대로 옮긴다.
+    1분봉으로 만드는 날은 한 번에 budget개까지. 다 맞췄으면 True."""
+    have = {r["day"] for r in db.candle_history(symbol, 100_000, REGULAR_TF)}
+    todo = [r for r in db.candle_history(symbol, 100_000, "1d") if r["day"] not in have and r["day"] < today]
+    copies = [r for r in todo if not nxt or r["day"] < toss.NXT_START]
+    if copies:
+        db.upsert_candles(symbol, copies, REGULAR_TF)
+    rebuild = sorted((r for r in todo if nxt and r["day"] >= toss.NXT_START), key=lambda r: r["day"], reverse=True)
+    for r in rebuild[:budget]:
+        bar = client.regular_day(symbol, r["day"])
+        db.upsert_candles(symbol, [bar or r], REGULAR_TF)  # 정규장 거래가 없던 날(거래정지 등)은 일봉 그대로
+    return len(rebuild) <= budget
+
+
+def regular_ready(db: Database, symbol: str) -> bool:
+    """정규장 일봉이 일봉과 같은 날들까지 다 만들어졌는지 (덜 됐으면 사이가 비어서 지표가 틀린다)."""
+    count, _ = db.candle_range(symbol, "1d")
+    return count > 0 and db.candle_range(symbol, REGULAR_TF)[0] >= count
+
+
 class StockSlot:
     """종목 계좌 하나의 전략과 오늘 계획 (돈과 주식은 장부 VaultBook에 있다)."""
 
@@ -119,6 +145,7 @@ class StockBot:
         self.holidays: set[str] = set(db.get_state("extra_holidays") or [])
         self.open_day: str | None = None
         self.synced_today: dict[str, tuple[str, int]] = {}  # 종목 → (날짜, 받아 둔 일봉 수)
+        self.regular_today: dict[str, str] = {}  # 종목 → 정규장 일봉을 다 맞춘 날
         self.report_day: str | None = db.get_state("report_day")
         self.stocks_day: str | None = (db.get_state("stocks") or {}).get("day")
         self.last_quotes = self.last_sync = self.last_snapshot = self.last_client_try = 0.0
@@ -246,6 +273,11 @@ class StockBot:
         self.quotes.update(self._call(self.client.quotes, symbols))
         self.prices.update({sym: q["price"] for sym, q in self.quotes.items() if q.get("price")})
         self.last_quotes = time.monotonic()
+        previous = krx.previous_trading_day(now_kst().date(), self.holidays).isoformat()
+        for sym in symbols:  # 등락률은 전날 정규장 종가 기준 (NXT 애프터마켓 20:00 종가 말고)
+            last = self.db.candle_history(sym, 1, REGULAR_TF)
+            if sym in self.quotes and last and last[0]["day"] == previous:
+                self.quotes[sym]["prev_close"] = last[0]["close"]
 
     def _call(self, fn, *args, **kwargs):
         """토스증권 호출. 허용 IP 오류면 표시해 두고, 키 만료면 알린 뒤 그대로 올려 보낸다."""
@@ -287,21 +319,41 @@ class StockBot:
         return False
 
     def _plan(self, slot: StockSlot, today: str) -> None:
-        """오늘 계획: 어제까지의 일봉 + 오늘 시가. 시가가 아직 없으면 다음 루프에서 다시."""
+        """오늘 계획: 어제까지의 정규장 일봉 + 오늘 정규장 시가. 시가나 정규장 일봉이 아직이면 다음 루프에서 다시."""
         today_open = (self.quotes.get(slot.symbol) or {}).get("open")
         if not today_open:
             return
-        self._ensure_history(slot.symbol, today, slot.strategy.window + 5)
-        history = self.db.candle_history(slot.symbol, slot.strategy.window, "1d")
+        if not self._ensure_history(slot.symbol, today, slot.strategy.window + 5):
+            return  # 정규장 일봉을 만드는 중 (다음 루프에서 이어서)
+        history = self.db.candle_history(slot.symbol, slot.strategy.window, REGULAR_TF)
         slot.plan = slot.strategy.plan(history, today_open)
         slot.plan_day = today
         self.event("info", f"[{today}] {slot.name} · {slot.strategy.label} · {slot.plan.note}")
 
-    def _ensure_history(self, symbol: str, today: str, wanted: int) -> None:
-        if self.synced_today.get(symbol, ("", 0)) >= (today, wanted):
-            return  # 오늘 이미 이만큼 받아 둠
-        self._call(sync_daily, self.db, self.client, symbol, wanted, today)
-        self.synced_today[symbol] = (today, wanted)
+    def _ensure_history(self, symbol: str, today: str, wanted: int) -> bool:
+        """일봉을 모으고 정규장 일봉을 맞춘다. 정규장 일봉까지 다 됐으면 True."""
+        if self.synced_today.get(symbol, ("", 0)) < (today, wanted):
+            self._call(sync_daily, self.db, self.client, symbol, wanted, today)
+            self.synced_today[symbol] = (today, wanted)
+            self.regular_today.pop(symbol, None)
+        if self.regular_today.get(symbol) == today:
+            return True
+        busy = krx.session(now_kst(), self.holidays) in ("open", "closing")
+        done = self._call(sync_regular, self.db, self.client, symbol, self._nxt(symbol, today), today,
+                          REGULAR_BUDGET[busy])
+        if done:
+            self.regular_today[symbol] = today
+        return done
+
+    def _nxt(self, symbol: str, today: str) -> bool:
+        """넥스트레이드에서도 거래되는 종목인지 (한 달에 한 번 확인해서 기억해 둔다)."""
+        known = self.db.get_state("nxt_symbols") or {}
+        entry = known.get(symbol)
+        if not entry or entry["checked"] < (date.fromisoformat(today) - timedelta(days=30)).isoformat():
+            entry = {"nxt": self._call(self.client.nxt_supported, [symbol]).get(symbol, False), "checked": today}
+            known[symbol] = entry
+            self.db.set_state("nxt_symbols", known)
+        return entry["nxt"]
 
     def _rank_bars(self) -> int:
         """순위 계산에 쓰는 일봉 수: 백테스트 기간(거래일) + 지표 계산용 앞부분."""
@@ -568,7 +620,8 @@ class StockBot:
         for sym in symbols:
             self.db.delete_state(f"ranking_request:{sym}")
             old = rankings.get(sym) or {}
-            if old.get("day") == today and (old.get("error") or len(old.get("results") or []) == len(STOCK_STRATEGIES)):
+            if old.get("day") == today and old.get("bars") == REGULAR_TF \
+                    and (old.get("error") or len(old.get("results") or []) == len(STOCK_STRATEGIES)):
                 continue
             if not SYMBOL_PATTERN.match(sym):
                 continue
@@ -578,14 +631,17 @@ class StockBot:
     def _rank(self, symbol: str, today: str, rankings: dict) -> None:
         wanted = self._rank_bars()
         try:
-            self._ensure_history(symbol, today, wanted)
+            ready = self._ensure_history(symbol, today, wanted)
         except toss.TossError as e:
-            rankings[symbol] = {"day": today, "error": str(e)}
+            rankings[symbol] = {"day": today, "bars": REGULAR_TF, "error": str(e)}
             self.db.set_state("rankings", rankings)
             return
-        candles = self.db.candle_history(symbol, wanted, "1d")
+        if not ready:  # 정규장 일봉을 만드는 중: 다음 루프에서 이어서 (웹페이지가 부탁한 종목도 잊지 않게)
+            self.db.set_state(f"ranking_request:{symbol}", {"at": ts()})
+            return
+        candles = self.db.candle_history(symbol, wanted, REGULAR_TF)
         if len(candles) < backtest.WARMUP + 30:
-            rankings[symbol] = {"day": today, "error": "상장한 지 얼마 안 돼서 과거 데이터가 부족해요"}
+            rankings[symbol] = {"day": today, "bars": REGULAR_TF, "error": "상장한 지 얼마 안 돼서 과거 데이터가 부족해요"}
             self.db.set_state("rankings", rankings)
             return
         # 앞부분은 지표 계산용 (52주 신고가처럼 긴 전략도 1년치를 보고 시작). 상장이 짧으면 있는 만큼만
@@ -593,7 +649,7 @@ class StockBot:
         params = {name: strategy_params(self.cfg, name) for name in STOCK_STRATEGIES}
         results = backtest.rank_strategies(candles, self.fee_rate, self.rank_by, TRADING_DAYS_PER_YEAR, params,
                                            warmup=warmup, sell_cost=self.sell_tax, strategies=STOCK_STRATEGIES)
-        rankings[symbol] = {"day": today, "computed_at": ts(), "rank_by": self.rank_by,
+        rankings[symbol] = {"day": today, "bars": REGULAR_TF, "computed_at": ts(), "rank_by": self.rank_by,
                             "from": candles[warmup]["day"], "to": candles[-1]["day"],
                             "days": len(candles) - warmup, "results": results}
         self.db.set_state("rankings", rankings)
@@ -700,7 +756,8 @@ class StockBot:
                     self.event("info", "정상으로 돌아왔어요")
                     self.last_error = None
                 pending = self.executor is not None and getattr(self.executor, "pending", lambda: None)()
-                wait = self.interval if sess in ("open", "closing") or pending else self.idle
+                busy = sess in ("open", "closing") or pending or self.db.states("ranking_request:")  # 순위·정규장 일봉 만드는 중이면 빨리
+                wait = self.interval if busy else self.idle
             except Exception as e:  # 어떤 오류가 나도 봇은 멈추지 않고 재시도한다
                 message = f"토스증권 오류: {e}" if isinstance(e, toss.TossError) else f"오류: {e!r}"
                 if message != self.last_error:

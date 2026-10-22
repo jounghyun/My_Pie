@@ -44,6 +44,7 @@ class FakeToss:
         self.fill_ratio = 1.0
         self.reject = False
         self.closed = set()  # 장이 안 열리는 날
+        self.nxt, self.regular_, self.regular_calls = set(), {}, []  # 넥스트레이드 종목, 정규장 일봉, 받아 간 날
 
     def set(self, symbol, day, price, today_open=None, prev=None):
         """오늘(day) 시세와, 어제까지 일봉 + 오늘 진행 중인 일봉."""
@@ -60,6 +61,14 @@ class FakeToss:
         if before:
             rows = [c for c in rows if c["day"] < before]
         return rows[:count]
+
+    def nxt_supported(self, symbols):
+        return {s: s in self.nxt for s in symbols}
+
+    def regular_day(self, symbol, day):
+        """정규장만의 일봉: 따로 정해 두지 않았으면 일봉과 같다 (NXT가 아닌 종목처럼)."""
+        self.regular_calls.append((symbol, day))
+        return self.regular_.get((symbol, day)) or next((c for c in self.candles_.get(symbol, []) if c["day"] == day), None)
 
     def cash(self):
         return self.cash_
@@ -260,6 +269,40 @@ class StockBotTest(TempDb):
         self.request(6, action="strategy", slot=sid, strategy="ma_cross")  # 하나로 되돌리면 조합 칸은 지운다
         bot.step(at(DAY2, "09:05"))
         self.assertNotIn("buy", self.slot(bot))
+
+    def test_nxt_stock_is_judged_on_regular_session_bars(self):
+        prev = [candle("2026-10-21", 100_000, 120_000, 80_000, 110_000),   # NXT 종목 일봉 = 08:00~20:00 전체
+                candle("2025-02-28", 50_000, 51_000, 49_000, 50_500)]       # NXT가 생기기 전: 일봉 = 정규장
+        self.toss.set(self.SYMBOL, DAY1, 100_000, prev=prev)
+        self.toss.nxt.add(self.SYMBOL)
+        regular = candle("2026-10-21", 101_000, 105_000, 99_000, 104_000)   # 09:01~15:30 1분봉으로 만든 정규장 일봉
+        self.toss.regular_[(self.SYMBOL, "2026-10-21")] = regular
+        bot = self.make_bot()
+        self.request(1, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="buy_and_hold", amount=350_000)
+        bot.step(at(DAY1, "08:30"))
+        bot.step(at(DAY1, "09:01"))
+        rows = self.db.candle_history(self.SYMBOL, 10, stockbot.REGULAR_TF)
+        ohlc = lambda c: (c["day"], c["open"], c["high"], c["low"], c["close"])
+        self.assertEqual([ohlc(r) for r in rows], [ohlc(prev[1]), ohlc(regular)])
+        self.assertEqual(self.toss.regular_calls, [(self.SYMBOL, "2026-10-21")])  # 1분봉은 NXT 뒤 날짜만, 한 번
+        bot.step(at(DAY1, "09:02"))
+        x = self.db.get_state("status")["slots"][0]
+        self.assertAlmostEqual(x["change_rate"], (100_000 / 104_000 - 1) * 100)  # 등락률도 전날 정규장 종가 기준
+        self.assertEqual(self.db.get_state("rankings")[self.SYMBOL]["bars"], stockbot.REGULAR_TF)
+
+    def test_regular_bars_are_built_a_few_days_at_a_time(self):
+        days = [f"2026-10-{d:02d}" for d in range(1, 21)]
+        self.toss.candles_[self.SYMBOL] = [candle(d, 100, 110, 90, 105) for d in reversed(days)]
+        self.toss.nxt.add(self.SYMBOL)
+        self.db.upsert_candles(self.SYMBOL, self.toss.candles_[self.SYMBOL])
+        done = stockbot.sync_regular(self.db, self.toss, self.SYMBOL, True, DAY1, budget=8)
+        self.assertFalse(done)                                           # 한 번에 8일만
+        self.assertFalse(stockbot.regular_ready(self.db, self.SYMBOL))
+        self.assertEqual(self.toss.regular_calls[0], (self.SYMBOL, "2026-10-20"))  # 최근 날부터
+        stockbot.sync_regular(self.db, self.toss, self.SYMBOL, True, DAY1, budget=8)
+        self.assertTrue(stockbot.sync_regular(self.db, self.toss, self.SYMBOL, True, DAY1, budget=8))
+        self.assertTrue(stockbot.regular_ready(self.db, self.SYMBOL))
+        self.assertEqual(len(self.toss.regular_calls), 20)
 
     def test_key_expiry_is_alerted_with_renewal_steps(self):
         bot = self.make_bot()
@@ -565,6 +608,9 @@ class StockWebTest(TempDb):
         rows = [candle((start + timedelta(days=i)).strftime("%Y-%m-%d"), 100 + i % 7, 104 + i % 7, 97 + i % 7, 101 + i % 7)
                 for i in range(600)]
         self.db.upsert_candles("005930", rows)
+        sim = web.build_stock_simulation(self.stock_path, cfg, "005930", 365, "disparity")
+        self.assertTrue(sim["need_data"])                                # 정규장 일봉이 아직 없으면 기다린다
+        self.db.upsert_candles("005930", rows, stockbot.REGULAR_TF)
         sim = web.build_stock_simulation(self.stock_path, cfg, "005930", 365, "disparity")
         self.assertTrue(sim["ready"])
         self.assertEqual((sim["detail"]["name"], len(sim["detail"]["close"])), ("disparity", 365 * 250 // 365))

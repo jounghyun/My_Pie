@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import auth, backtest, krx, pin, stoploss, telegram, timeframes, toss, upbit
 from .bot import validate_slots
+from .stockbot import REGULAR_TF, regular_ready
 from .broker import MIN_ORDER_KRW
 from .config import load_config
 from .db import Database
@@ -197,8 +198,17 @@ def build_stock_simulation(db_path: str, cfg: dict, symbol: str, days: int, stra
     """주식 전략 시뮬레이션 (일봉, 주식용 전략 목록, 증권거래세 반영)."""
     if not STOCK_SYMBOL.match(symbol):
         return {"market": symbol, "tf": "1d", "days": days, "periods": [], "ready": False, "message": "잘못된 종목이에요."}
+    db = _open(db_path)
+    try:  # 봇은 정규장(09:00~15:30)에서만 사고팔아서, 정규장 일봉이 다 만들어진 뒤에 계산한다
+        ready = bool(db) and regular_ready(db, symbol)
+    finally:
+        if db:
+            db.close()
+    if not ready:
+        return {"market": symbol, "tf": "1d", "days": days, "periods": [], "ready": False, "need_data": True,
+                "message": "정규장 일봉을 만드는 중이에요 (처음 고른 종목은 몇 분 걸려요)"}
     sc = cfg["stock"]
-    return _simulate(db_path, symbol, "1d", days, strategy, periods=STOCK_SIM_PERIODS,
+    return _simulate(db_path, symbol, "1d", days, strategy, periods=STOCK_SIM_PERIODS, bars_tf=REGULAR_TF,
                      bars_of=lambda d: d * 250 // 365, strategies=STOCK_STRATEGIES, fee=float(sc["fee_rate"]),
                      sell_cost=float(sc["sell_tax"]), rank_by=sc.get("rank_by", "return"), per_year=250, cfg=cfg,
                      is_stale=lambda last: last < krx.previous_trading_day(now_kst().date()).isoformat(), rule=rule,
@@ -224,14 +234,15 @@ def _query_rule(query: dict, registry: dict) -> dict | None:
 
 def _simulate(db_path: str, market: str, tf: str, days: int, strategy: str, *, periods, bars_of, strategies: dict,
               fee: float, sell_cost: float, rank_by: str, per_year: float, cfg: dict, is_stale,
-              rule: dict | None = None, stop_loss: float = 0.0) -> dict:
+              rule: dict | None = None, stop_loss: float = 0.0, bars_tf: str | None = None) -> dict:
+    """bars_tf: 계산에 쓰는 봉 (주식은 정규장 일봉). 없으면 tf."""
     out = {"market": market, "tf": tf, "days": days, "periods": [], "ready": False}
     db = _open(db_path)
     if not db:
         return {**out, "message": "봇이 아직 시작되지 않았어요."}
     history = backtest.history_needed(strategies)
     try:
-        candles = db.candle_history(market, bars_of(periods[-1][0]) + history, tf)
+        candles = db.candle_history(market, bars_of(periods[-1][0]) + history, bars_tf or tf)
     finally:
         db.close()
     out["periods"] = [{"days": d, "label": label, "ok": len(candles) - bars_of(d) >= backtest.WARMUP}

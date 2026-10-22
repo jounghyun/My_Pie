@@ -36,10 +36,14 @@ ACCOUNT = "TOSS_ACCOUNT"          # 계좌 순번 (accountSeq). 계좌번호가 
 TOKEN_KEY = "toss_token"          # 주식 봇 DB에 저장하는 토큰
 TOKEN_SKEW = 60                   # 만료 이만큼 전에 미리 새로 받는다 (초)
 AUTH_ERRORS = ("invalid-token", "expired-token", "token-revoked")
+# 넥스트레이드(NXT) 개장일. 이날부터 NXT 종목의 일봉은 08:00~20:00 거래를 다 합친 값이라, 봇이 사고파는
+# 정규장(09:00~15:30) 일봉은 1분봉으로 따로 만든다. 1분봉 ts는 봉이 끝난 시각이라 09:01~15:30 봉이 정규장이다
+NXT_START = "2025-03-04"
+REGULAR = ("09:00", "15:30")
 IP_ERRORS = ("ip-not-allowed", "access_denied")
 # 같은 종류의 호출 사이 최소 간격 (초). 토스증권 호출 한도보다 넉넉하게
 PACING = {"/api/v1/stocks/all": 1.1, "/api/v1/accounts": 1.1, "/api/v1/buying-power": 0.4,
-          "/api/v1/candles": 0.06, "/api/v1/market-calendar": 0.4}
+          "/api/v1/candles": 0.06, "/api/v1/market-calendar": 0.4, "/api/v1/stocks": 0.25}
 STATUS = {"FILLED": "filled", "CANCELED": "cancelled", "REJECTED": "rejected", "REPLACED": "cancelled",
           "PARTIAL_FILLED": "partial"}  # 나머지(PENDING 등)는 'open'
 
@@ -229,25 +233,47 @@ class TossClient:
         return rows, result.get("nextBefore")
 
     def _today_info(self, symbol: str, today: str) -> dict:
-        """오늘 시가와 전날 종가. 시가는 첫 거래가 생긴 뒤에 한 번 구하면 하루 동안 그대로 쓴다."""
+        """오늘 시가와 전날 종가. 시가는 첫 거래가 생긴 뒤에 한 번 구하면 하루 동안 그대로 쓴다.
+        시가는 정규장 첫 1분봉의 시가다 (일봉 시가는 NXT 종목이면 08:00 프리마켓 가격이라 봇이 살 수 없는 값)."""
         cached = self._day_info.get((symbol, today))
         if cached and cached.get("open"):
             return cached
         daily = self.daily_candles(symbol, 2)
         info = {"open": None, "prev_close": None}
-        if daily and daily[0]["day"] == today:
-            info = {"open": daily[0]["open"], "prev_close": daily[1]["close"] if len(daily) > 1 else None}
-        elif daily:
-            info["prev_close"] = daily[0]["close"]
-            if now_kst().strftime("%H:%M") >= "09:00":  # 진행 중인 일봉이 없으면 오늘 첫 1분봉(09:00~09:01)의 시가
-                first = (self._call("GET", "/api/v1/candles", {"symbol": symbol, "interval": "1m", "count": 1,
-                                                               "before": f"{today}T09:01:00+09:00"}) or {})
-                bar = (first.get("candles") or [None])[0]
-                if bar and _day(bar["timestamp"]) == today:
-                    info["open"] = _num(bar["openPrice"])
+        if daily:
+            info["prev_close"] = (daily[1]["close"] if len(daily) > 1 else None) if daily[0]["day"] == today \
+                else daily[0]["close"]
+        if now_kst().strftime("%H:%M") >= REGULAR[0]:
+            info["open"] = self._regular_open(symbol, today)
         self._day_info = {k: v for k, v in self._day_info.items() if k[1] == today}
         self._day_info[(symbol, today)] = info
         return info
+
+    def _regular_open(self, symbol: str, today: str) -> float | None:
+        for until in ("09:30", "15:30"):  # 장 초반 30분에 거래가 없던 종목이면 그 뒤에서 찾는다
+            rows, _ = self.minute_candles(symbol, f"{today}T{until}:00+09:00")
+            regular = [m for m in rows if m["ts"][:10] == today and REGULAR[0] < m["ts"][11:16] <= REGULAR[1]]
+            if regular:
+                return min(regular, key=lambda m: m["ts"])["open"]
+        return None
+
+    def regular_day(self, symbol: str, day: str) -> dict | None:
+        """그날 정규장(09:00~15:30)만의 일봉. 1분봉을 두 번(15:30부터, 12:10부터 거꾸로 200개씩) 받아 만든다.
+        정규장 거래가 없었으면 None."""
+        bars: dict[str, dict] = {}
+        for until in ("15:30", "12:10"):
+            rows, _ = self.minute_candles(symbol, f"{day}T{until}:00+09:00")
+            bars.update({m["ts"]: m for m in rows if m["ts"][:10] == day and REGULAR[0] < m["ts"][11:16] <= REGULAR[1]})
+        if not bars:
+            return None
+        part = [bars[k] for k in sorted(bars)]
+        return {"day": day, "open": part[0]["open"], "high": max(m["high"] for m in part),
+                "low": min(m["low"] for m in part), "close": part[-1]["close"], "volume": sum(m["volume"] for m in part)}
+
+    def nxt_supported(self, symbols: list[str]) -> dict[str, bool]:
+        """종목마다 넥스트레이드(NXT)에서도 거래되는지."""
+        result = self._call("GET", "/api/v1/stocks", {"symbols": ",".join(symbols)}) or []
+        return {s["symbol"]: bool((s.get("koreanMarketDetail") or {}).get("nxtSupported")) for s in result}
 
     def quotes(self, symbols: list[str]) -> dict[str, dict]:
         """{종목: {"price", "open", "prev_close"}}. 현재가는 한 번에 받고, 시가·전날 종가는 종목마다 하루 한 번."""
