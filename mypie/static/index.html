@@ -853,20 +853,21 @@ function slotPanel(x, kind) {
     row.append(pin, go);
     p.append(el('label', { class: 'hint' }, '판단 주기 ', ts_), rb, stop, row,
              el('span', { class: 'hint', text: '들고 있는 코인은 팔지 않고, 새 전략이 다음 봉부터 판단해요. 손절선은 산 값보다 정한 만큼 떨어지면 바로 팔아요.' }));
-  } else {  // 팔고 빼기: 코인을 바로 다 판 뒤에 원화를 금고로 빼고 지운다 · 돈이 없으면 그냥 지우기
+  } else {  // 팔고 빼기: 코인을 바로 다 팔고 원화를 금고로 뺀다 (계좌는 0원 지켜보기로 남는다) · 0원이면 지우기
     const money = hasMoney(x);
     const action = x.closing ? 'cancel_close' : money ? 'close' : 'remove';
     const go = el('button', { type: 'button', class: 'primary', text: x.closing ? '팔고 빼기 취소' : money ? '팔고 빼기' : '지우기' });
     go.onclick = () => {
-      if (action === 'close' && x.holding && !confirm(`${x.name}: 코인을 지금 시장가로 다 팔고, 원화를 금고로 뺀 뒤 계좌를 지울까요?`
+      if (action === 'close' && x.holding && !confirm(`${x.name}: 코인을 지금 시장가로 다 팔고, 원화를 금고로 뺄까요?
+계좌는 지우지 않고 0원 지켜보기로 남아요.`
                                                       + (S.data.status.mode === 'live' ? '\n\n⚠️ 실제 돈으로 업비트에 매도 주문이 나가요.' : ''))) return;
       send({ action, slot: x.id }, pin, close);
     };
     row.append(pin, go);
-    p.append(row, el('span', { class: 'hint', text: x.closing ? '취소하면 지우지 않고 다시 전략대로 사고팔아요.'
-      : x.holding ? '들고 있는 코인을 바로 다 팔고, 판 돈과 원화를 금고로 뺀 뒤 계좌를 지워요.'
-      : money ? `원화 ${won(x.book.krw)}을(를) 금고로 빼고 계좌를 지워요.`
-      : '돈도 코인도 없는 계좌(지켜보기)라 바로 지워요.' }));
+    p.append(row, el('span', { class: 'hint', text: x.closing ? '취소하면 팔지 않고 다시 전략대로 사고팔아요.'
+      : x.holding ? '들고 있는 코인을 바로 다 팔고, 판 돈과 원화를 금고로 빼요. 계좌는 0원 지켜보기로 남고, 그다음에 지울 수 있어요.'
+      : money ? `원화 ${won(x.book.krw)}을(를) 금고로 빼요. 계좌는 0원 지켜보기로 남고, 그다음에 지울 수 있어요.`
+      : '원화도 코인도 없는 계좌(지켜보기)예요. 바로 지워요.' }));
   }
   p.onclick = (ev) => ev.stopPropagation();
   return p;

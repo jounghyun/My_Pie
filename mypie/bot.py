@@ -5,7 +5,7 @@
 
 돈은 금고와 코인 계좌 여러 개로 나눠 쓴다 (broker.Book 참고, 주식 봇과 같은 생각).
 코인 계좌마다 코인 하나 + 전략(살 때·팔 때) + 판단 주기 + 손절선이 있고, 자기 원화로만 따로 판단하고 사고판다.
-웹페이지 요청(계좌 만들기·이체·전략 바꾸기·팔고 빼기·계좌 전환)은 하나씩 처리한다.
+웹페이지 요청(계좌 만들기·이체·전략 바꾸기·팔고 빼기·지우기·계좌 전환)은 하나씩 처리한다.
 
 계좌마다 판단 주기(일봉·4시간봉·1시간봉·15분봉)가 있다. 그 주기의 새 봉이 시작될 때(일봉은 매일 09:00 KST)
 계획을 세우고, 매도 신호가 난 계좌를 먼저 판 다음 매수 신호가 난 계좌를 산다 ('보유 유지'는 그대로).
@@ -353,16 +353,24 @@ class Bot:
         return stoploss.line(b["cost"], b["coin"], slot.stop_loss)
 
     def _close_out(self, slot: Slot, price: float) -> None:
-        """'팔고 빼기'를 누른 계좌: 들고 있는 코인을 팔고, 다 팔렸으면 원화를 금고로 빼고 지운다."""
+        """'팔고 빼기'를 누른 계좌: 들고 있는 코인을 팔고, 다 팔렸으면 원화를 금고로 뺀다 (계좌는 0원 지켜보기로 남는다)."""
         if self._holding(slot, price):
             self._sell(slot, price, "팔고 빼기")
         if not self._holding(slot, price):
-            if self.book.slot(slot.id)["coin"] > 0:
-                self.book.clear_dust(slot.id)  # 최소 주문 금액보다 적은 자투리는 장부에서만 정리
-            moved = self.book.remove_slot(slot.id)
-            self._drop_sstate(slot.id)
-            self._load_slots()
-            self.event("info", f"{self._tag(slot)}다 팔고 뺐어요 · 원화 {moved:,.0f}원은 금고로 옮기고 계좌를 지웠어요", notify=True)
+            moved = self._withdraw(slot.id)
+            self.event("info", f"{self._tag(slot)}다 팔고 원화 {moved:,.0f}원을 금고로 뺐어요 · "
+                               "계좌는 0원 지켜보기로 남아요 (필요 없으면 '지우기')", notify=True)
+
+    def _withdraw(self, sid: str) -> float:
+        """팔고 빼기 마무리: 원화를 전부 금고로 빼고 계좌는 지켜보기로 남긴다. 뺀 금액을 돌려준다."""
+        if self.book.slot(sid)["coin"] > 0:
+            self.book.clear_dust(sid)  # 최소 주문 금액보다 적은 자투리는 장부에서만 정리
+        moved = self.book.slot(sid)["krw"]
+        if moved > 0:
+            self.book.transfer(sid, -moved)
+        self.book.set_closing(sid, False)
+        self._load_slots()
+        return moved
 
     def _intraday(self, slot: Slot, price: float, bar: str) -> None:
         plan, st = slot.plan, self._sstate(slot)
@@ -540,19 +548,25 @@ class Bot:
         name = s["name"]
         price = self.prices.get(s["market"]) or s["avg_price"]
         holding = s["coin"] * price >= MIN_ORDER_KRW
-        if action == "remove" or (action == "close" and not holding):
+        if action == "remove":  # 지우기: 원화도 코인도 없는(지켜보기) 계좌만
             if holding:
-                raise VaultError("코인이 남아 있어서 지울 수 없어요. '팔고 빼기'를 써 주세요")
+                raise VaultError("코인이 남아 있어서 지울 수 없어요. '팔고 빼기'를 먼저 써 주세요")
+            if s["krw"] >= 1:
+                raise VaultError(f"원화 {s['krw']:,.0f}원이 남아 있어서 지울 수 없어요. '팔고 빼기'로 금고에 먼저 빼 주세요")
             if s["coin"] > 0:
                 self.book.clear_dust(sid)  # 팔 수 없는 자투리는 장부에서만 정리
-            moved = self.book.remove_slot(sid)
+            self.book.remove_slot(sid)
             self._drop_sstate(sid)
             self._load_slots()
-            return f"{name} 계좌를 뺐어요 · 원화 {moved:,.0f}원은 금고로" if moved else f"{name} 계좌를 지웠어요"
-        if action == "close":  # 팔고 빼기: 코인이 있으면 바로 다 판 뒤에 원화를 금고로 빼고 지운다
+            return f"{name} 계좌를 지웠어요"
+        if action == "close":  # 팔고 빼기: 코인을 바로 다 팔고 원화를 금고로 뺀다 (계좌는 0원 지켜보기로 남는다)
+            if not holding:
+                moved = self._withdraw(sid)
+                return (f"{name}: 원화 {moved:,.0f}원을 금고로 뺐어요 · 계좌는 0원 지켜보기로 남아요" if moved
+                        else f"{name}: 뺄 돈이 없어요 · 이미 0원 지켜보기예요")
             self.book.set_closing(sid, True)
             self._load_slots()
-            return f"{name}: 코인을 다 팔고 나서 원화를 금고로 빼고 지워요"
+            return f"{name}: 코인을 다 팔고 나서 원화를 금고로 빼요 · 계좌는 지켜보기로 남아요"
         if action == "cancel_close":
             self.book.set_closing(sid, False)
             self._load_slots()

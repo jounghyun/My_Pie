@@ -104,7 +104,7 @@ class Book:
         self.save()
 
     def set_closing(self, sid: str, on: bool) -> None:
-        """'팔고 빼기': 켜 두면 봇이 이 계좌 코인을 다 팔고, 원화를 금고로 빼고 지운다 (그동안은 새로 사지 않는다)."""
+        """'팔고 빼기': 켜 두면 봇이 이 계좌 코인을 다 팔고 원화를 금고로 뺀다 (계좌는 지켜보기로 남는다) (그동안은 새로 사지 않는다)."""
         s = self.slot(sid)
         if on:
             s["closing"] = True

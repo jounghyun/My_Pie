@@ -110,7 +110,7 @@ class VaultBook:
         return s["cash"]
 
     def set_closing(self, sid: str, on: bool) -> None:
-        """'팔고 빼기': 켜 두면 봇이 장중에 이 계좌 주식을 다 팔고, 잔액을 금고로 빼고 지운다 (그동안은 새로 사지 않는다)."""
+        """'팔고 빼기': 켜 두면 봇이 장중에 이 계좌 주식을 다 팔고 잔액을 금고로 뺀다 (계좌는 지켜보기로 남는다) (그동안은 새로 사지 않는다)."""
         s = self.slot(sid)
         if on:
             s["closing"] = True

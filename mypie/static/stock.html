@@ -445,17 +445,17 @@ function slotPanel(x, kind) {
     row.append(pin, go);
     p.append(rb, stop, row, el('span', { class: 'hint', text: '들고 있는 주식은 팔지 않고, 새 전략이 바로(장중) 또는 다음 장 시작에 판단해요. '
                                                                + '손절선은 산 값보다 정한 만큼 떨어지면 장중에 바로 팔아요.' }));
-  } else {  // 팔고 빼기: 장중에 주식을 다 판 뒤에 잔액을 금고로 빼고 지운다 · 돈이 없으면 그냥 지우기
+  } else {  // 팔고 빼기: 장중에 주식을 다 팔고 잔액을 금고로 뺀다 (계좌는 0원 지켜보기로 남는다) · 0원이면 지우기
     const money = hasMoney(x);
     const action = x.closing ? 'cancel_close' : money ? 'close' : 'remove';
     const go = el('button', { type: 'button', class: 'primary', text: x.closing ? '팔고 빼기 취소' : money ? '팔고 빼기' : '지우기' });
     go.onclick = () => send({ action, slot: x.id }, pin, close);
     row.append(pin, go);
-    p.append(row, el('span', { class: 'hint', text: x.closing ? '취소하면 지우지 않고 다시 전략대로 사고팔아요.'
-      : x.qty > 0 ? `주식 ${x.qty}주를 판 뒤에 판 돈과 잔액을 금고로 빼고 계좌를 지워요. `
+    p.append(row, el('span', { class: 'hint', text: x.closing ? '취소하면 팔지 않고 다시 전략대로 사고팔아요.'
+      : x.qty > 0 ? `주식 ${x.qty}주를 판 뒤에 판 돈과 잔액을 금고로 빼요. 계좌는 0원 지켜보기로 남고, 그다음에 지울 수 있어요. `
                     + '장중이면 바로, 장이 닫혀 있으면 다음 장 시작(09:00)에 팔아요. 그동안은 새로 사지 않아요.'
-      : money ? `잔액 ${won(x.cash)}을(를) 금고로 빼고 계좌를 지워요.`
-      : '돈도 주식도 없는 계좌(지켜보기)라 바로 지워요.' }));
+      : money ? `잔액 ${won(x.cash)}을(를) 금고로 빼요. 계좌는 0원 지켜보기로 남고, 그다음에 지울 수 있어요.`
+      : '잔액도 주식도 없는 계좌(지켜보기)예요. 바로 지워요.' }));
   }
   p.onclick = (ev) => ev.stopPropagation();
   return p;

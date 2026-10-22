@@ -293,7 +293,7 @@ class StockBotTest(TempDb):
         self.request(2, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="rsi", amount=0)
         bot.step(at(DAY1, "08:30"))
         empty = next(k for k, v in bot.book.data["slots"].items() if v["name"] == "SK하이닉스 2")
-        self.request(3, action="close", slot=empty)                      # 주식이 없으면 바로 지운다
+        self.request(3, action="remove", slot=empty)                     # 0원 계좌(지켜보기)는 그냥 지운다
         bot.step(at(DAY1, "08:31"))
         self.assertEqual(len(bot.book.data["slots"]), 1)
         bot.step(at(DAY1, "09:01"))                                      # 3주 매수
@@ -308,10 +308,14 @@ class StockBotTest(TempDb):
         self.request(6, action="close", slot=sid)
         bot.step(at(DAY1, "15:42"))
         self.toss.set(self.SYMBOL, DAY2, 101_000)
-        bot.step(at(DAY2, "09:01"))                                      # 다음 장 시작에 다 팔고 지운다
+        bot.step(at(DAY2, "09:01"))                                      # 다음 장 시작에 다 팔고 잔액을 금고로
         self.assertEqual([t[0] for t in self.trades()], ["buy", "sell"])
-        self.assertEqual(bot.book.data["slots"], {})
+        s = self.slot(bot)
+        self.assertEqual((s["qty"], s["cash"], "closing" in s), (0, 0, False))  # 계좌는 0원 지켜보기로 남는다
         self.assertGreater(bot.book.vault, 1_000_000)                    # 판 돈과 잔액은 금고로
+        self.request(7, action="remove", slot=sid)
+        bot.step(at(DAY2, "09:02"))
+        self.assertEqual(bot.book.data["slots"], {})                     # 0원이 된 뒤에 지우기
 
     def test_same_stock_can_have_several_accounts(self):
         self.toss.set(self.SYMBOL, DAY1, 100_000)

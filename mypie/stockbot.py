@@ -401,14 +401,22 @@ class StockBot:
             self._buy(slot, today, f"{plan.buy_stop:,.0f}원 돌파")
 
     def _close_out(self, slot: StockSlot) -> None:
-        """'팔고 빼기'를 누른 계좌: 들고 있는 주식을 팔고, 다 팔렸으면 잔액을 금고로 빼고 지운다."""
+        """'팔고 빼기'를 누른 계좌: 들고 있는 주식을 팔고, 다 팔렸으면 잔액을 금고로 뺀다 (계좌는 0원 지켜보기로 남는다)."""
         if self._holding(slot):
             self._sell(slot, "팔고 빼기")
         if not self._holding(slot):  # 일부만 체결되면 다음 루프에서 나머지를 판다
-            moved = self.book.remove_slot(slot.id)
-            self._drop_sstate(slot.id)
-            self._load_slots()
-            self.event("info", f"{self._tag(slot)}다 팔고 뺐어요 · 잔액 {moved:,.0f}원은 금고로 옮기고 계좌를 지웠어요", notify=True)
+            moved = self._withdraw(slot.id)
+            self.event("info", f"{self._tag(slot)}다 팔고 잔액 {moved:,.0f}원을 금고로 뺐어요 · "
+                               "계좌는 0원 지켜보기로 남아요 (필요 없으면 '지우기')", notify=True)
+
+    def _withdraw(self, sid: str) -> float:
+        """팔고 빼기 마무리: 잔액을 전부 금고로 빼고 계좌는 지켜보기로 남긴다. 뺀 금액을 돌려준다."""
+        moved = self.book.slot(sid)["cash"]
+        if moved > 0:
+            self.book.transfer(sid, -moved)
+        self.book.set_closing(sid, False)
+        self._load_slots()
+        return moved
 
     def _holding(self, slot: StockSlot) -> bool:
         return self.book.slot(slot.id)["qty"] > 0
@@ -583,15 +591,23 @@ class StockBot:
         if not self.book.has(sid):
             raise VaultError("그 종목 계좌가 없어요")
         name = self.book.slot(sid)["name"]
-        if action == "remove" or (action == "close" and self.book.slot(sid)["qty"] <= 0):
-            moved = self.book.remove_slot(sid)
+        if action == "remove":  # 지우기: 잔액도 주식도 없는(지켜보기) 계좌만
+            cash = self.book.slot(sid)["cash"]
+            if self.book.slot(sid)["qty"] <= 0 and cash >= 1:
+                raise VaultError(f"잔액 {cash:,.0f}원이 남아 있어서 지울 수 없어요. '팔고 빼기'로 금고에 먼저 빼 주세요")
+            self.book.remove_slot(sid)  # 주식이 남아 있으면 못 지운다
             self._drop_sstate(sid)
             self._load_slots()
-            return f"{name} 종목 계좌를 뺐어요 · 잔액 {moved:,.0f}원은 금고로" if moved else f"{name} 종목 계좌를 지웠어요"
-        if action == "close":  # 팔고 빼기: 주식이 있으면 장중에 다 판 뒤에 잔액을 금고로 빼고 지운다
+            return f"{name} 종목 계좌를 지웠어요"
+        if action == "close":  # 팔고 빼기: 장중에 주식을 다 팔고 잔액을 금고로 뺀다 (계좌는 0원 지켜보기로 남는다)
+            if self.book.slot(sid)["qty"] <= 0:
+                moved = self._withdraw(sid)
+                return (f"{name}: 잔액 {moved:,.0f}원을 금고로 뺐어요 · 계좌는 0원 지켜보기로 남아요" if moved
+                        else f"{name}: 뺄 돈이 없어요 · 이미 0원 지켜보기예요")
             self.book.set_closing(sid, True)
             self._load_slots()
-            return f"{name}: 주식 {self.book.slot(sid)['qty']:,}주를 팔고 나서 잔액을 금고로 빼고 지워요 (장중이면 바로, 아니면 다음 장 시작에)"
+            return (f"{name}: 주식 {self.book.slot(sid)['qty']:,}주를 팔고 나서 잔액을 금고로 빼요 "
+                    "(장중이면 바로, 아니면 다음 장 시작에) · 계좌는 지켜보기로 남아요")
         if action == "cancel_close":
             self.book.set_closing(sid, False)
             self._load_slots()
