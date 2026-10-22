@@ -65,21 +65,23 @@ def check_code(db: Database, code: str) -> tuple[bool, str]:
     return False, f"코드가 틀렸어요. (남은 기회 {MAX_ATTEMPTS - stored['attempts']}번)"
 
 
-def create_session(db: Database, days: int, info: dict) -> str:
+def create_session(db: Database, hours: float, info: dict) -> str:
     token = secrets.token_urlsafe(32)
     now = time.time()
     sessions = {k: v for k, v in (db.get_state(SESSIONS_KEY) or {}).items() if v["expires"] > now}
-    sessions[_hash(token)] = {"expires": now + days * 86400, "created": ts(), **info}
+    sessions[_hash(token)] = {"expires": now + hours * 3600, "started": now, "created": ts(), **info}
     newest = sorted(sessions.items(), key=lambda kv: kv[1]["expires"])[-MAX_SESSIONS:]
     db.set_state(SESSIONS_KEY, dict(newest))
     return token
 
 
-def valid_session(db: Database, token: str | None) -> bool:
+def valid_session(db: Database, token: str | None, hours: float) -> bool:
+    """로그인한 지 hours 시간이 안 지났는지. 설정을 줄이면 예전에 길게 받은 로그인도 거기에 맞춰 끝난다."""
     if not token:
         return False
     session = (db.get_state(SESSIONS_KEY) or {}).get(_hash(token))
-    return bool(session and session["expires"] > time.time())
+    now = time.time()
+    return bool(session and session["expires"] > now and session.get("started", 0) + hours * 3600 > now)
 
 
 def end_session(db: Database, token: str | None) -> None:

@@ -969,11 +969,19 @@ class AuthTest(TempDbTest):
         self.assertFalse(auth.check_code(self.db, code)[0])
 
     def test_sessions(self):
-        token = auth.create_session(self.db, 30, {"ip": "1.2.3.4"})
-        self.assertTrue(auth.valid_session(self.db, token))
-        self.assertFalse(auth.valid_session(self.db, "nope"))
+        token = auth.create_session(self.db, 24, {"ip": "1.2.3.4"})
+        self.assertTrue(auth.valid_session(self.db, token, 24))
+        self.assertFalse(auth.valid_session(self.db, "nope", 24))
+        with mock.patch("time.time", return_value=time.time() + 25 * 3600):
+            self.assertFalse(auth.valid_session(self.db, token, 24))      # 24시간이 지나면 다시 묻는다
+        with mock.patch("time.time", return_value=time.time() + 2 * 3600):
+            self.assertFalse(auth.valid_session(self.db, token, 1))      # 설정을 줄이면 예전 로그인도 거기에 맞춘다
         auth.end_session(self.db, token)
-        self.assertFalse(auth.valid_session(self.db, token))
+        self.assertFalse(auth.valid_session(self.db, token, 24))
+        sessions = self.db.get_state(auth.SESSIONS_KEY) or {}            # 30일짜리였던 예전 로그인 (시작 시각 없음)
+        sessions[auth._hash("old")] = {"expires": time.time() + 29 * 86400, "created": "2026-10-21 09:00:00"}
+        self.db.set_state(auth.SESSIONS_KEY, sessions)
+        self.assertFalse(auth.valid_session(self.db, "old", 24))
 
     def test_trusted_ips_expire(self):
         auth.trust_ip(self.db, "1.2.3.4", 24)
@@ -1124,6 +1132,7 @@ class WebLoginTest(TempDbTest):
         status, _, cookie = self.request("/api/login/verify", {"code": code})
         self.assertEqual(status, 200)
         self.assertIn("SameSite=Lax", cookie)                              # 다른 앱의 링크로 열어도 쿠키가 붙게
+        self.assertIn("Max-Age=86400", cookie)                             # 쿠키도 최대 24시간
         session = cookie.split(";")[0]
         self.assertEqual(self.request("/api/status", cookie=session)[0], 200)
         self.assertEqual(self.request("/api/status")[0], 200)              # 같은 IP는 쿠키 없이도 하루 동안

@@ -14,7 +14,7 @@ DEFAULTS = {
     "live": {"budget": 100_000, "max_budget": 1_000_000},
     "backtest": {"days": 1095, "rank_by": "return"},
     "params": {},
-    "web": {"host": "0.0.0.0", "port": 8000, "login": True, "code_digits": 2, "session_days": 30, "trust_hours": 24},
+    "web": {"host": "0.0.0.0", "port": 8000, "login": True, "code_digits": 2, "session_hours": 24, "trust_hours": 24},
     # 주식 봇 (토스증권 · 국내 주식). 수수료는 사고팔 때 모두, 증권거래세는 팔 때만 붙는다
     "stock": {"db_path": "data/stock.db", "mode": "paper", "paper_cash": 1_000_000, "fee_rate": 0.00015,
               "sell_tax": 0.002, "interval_sec": 10, "idle_sec": 60, "backtest_days": 1095, "rank_by": "return"},
