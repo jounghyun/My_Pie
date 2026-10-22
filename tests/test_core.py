@@ -975,6 +975,15 @@ class AuthTest(TempDbTest):
         auth.end_session(self.db, token)
         self.assertFalse(auth.valid_session(self.db, token))
 
+    def test_trusted_ips_expire(self):
+        auth.trust_ip(self.db, "1.2.3.4", 24)
+        self.assertTrue(auth.trusted_ip(self.db, "1.2.3.4"))
+        self.assertFalse(auth.trusted_ip(self.db, "1.2.3.5"))            # 다른 IP는 아니다
+        with mock.patch("time.time", return_value=time.time() + 25 * 3600):
+            self.assertFalse(auth.trusted_ip(self.db, "1.2.3.4"))        # 하루가 지나면 다시 묻는다
+        auth.untrust_ip(self.db, "1.2.3.4")
+        self.assertFalse(auth.trusted_ip(self.db, "1.2.3.4"))
+
 
 class EnvTest(unittest.TestCase):
     def test_write_env_keeps_other_values(self):
@@ -1114,11 +1123,21 @@ class WebLoginTest(TempDbTest):
         self.assertEqual(self.request("/api/login/verify", {"code": "x"})[0], 403)
         status, _, cookie = self.request("/api/login/verify", {"code": code})
         self.assertEqual(status, 200)
+        self.assertIn("SameSite=Lax", cookie)                              # 다른 앱의 링크로 열어도 쿠키가 붙게
         session = cookie.split(";")[0]
         self.assertEqual(self.request("/api/status", cookie=session)[0], 200)
+        self.assertEqual(self.request("/api/status")[0], 200)              # 같은 IP는 쿠키 없이도 하루 동안
+        self.db.set_state(auth.TRUSTED_KEY, {"127.0.0.1": 0})              # 하루가 지나면
         self.assertEqual(self.request("/api/control", {}, cookie=None)[0], 401)
+        self.assertEqual(self.request("/api/status", cookie=session)[0], 200)  # 쿠키는 그대로 30일
         self.request("/api/logout", {}, cookie=session)
         self.assertEqual(self.request("/api/status", cookie=session)[0], 401)
+
+    def test_logout_also_forgets_the_ip(self):
+        auth.trust_ip(self.db, "127.0.0.1", 24)
+        self.assertEqual(self.request("/api/status")[0], 200)
+        self.request("/api/logout", {})
+        self.assertEqual(self.request("/api/status")[0], 401)
 
     def test_no_login_when_telegram_not_connected(self):
         with mock.patch("mypie.telegram.load", return_value=None):

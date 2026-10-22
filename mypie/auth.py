@@ -1,4 +1,5 @@
 """웹페이지 로그인: 텔레그램으로 받은 코드를 넣으면 그 기기는 한동안 로그인된 상태로 둔다.
+로그인한 IP도 하루 동안은 다시 묻지 않는다.
 
 코드와 로그인 정보는 원문 대신 해시로만 DB에 남긴다. 웹 서버가 재시작돼도 로그인은 유지된다.
 """
@@ -14,6 +15,7 @@ from .timeutil import ts
 CODE_KEY = "login_code"
 SENDS_KEY = "login_sends"
 SESSIONS_KEY = "web_sessions"
+TRUSTED_KEY = "web_trusted_ips"
 CODE_TTL_SEC = 300        # 코드는 5분 동안만 유효
 MAX_ATTEMPTS = 3          # 한 코드로 틀릴 수 있는 횟수 (넘으면 코드를 지운다)
 RESEND_SEC = 30           # 코드를 다시 보낼 수 있는 간격
@@ -86,3 +88,22 @@ def end_session(db: Database, token: str | None) -> None:
     sessions = db.get_state(SESSIONS_KEY) or {}
     if sessions.pop(_hash(token), None) is not None:
         db.set_state(SESSIONS_KEY, sessions)
+
+
+# 로그인한 IP는 한동안 쿠키 없이도 들여보낸다 (아이폰 앱 안 브라우저처럼 쿠키를 자꾸 잃는 기기 때문에)
+
+def trust_ip(db: Database, ip: str, hours: float) -> None:
+    now = time.time()
+    trusted = {k: v for k, v in (db.get_state(TRUSTED_KEY) or {}).items() if v > now}
+    trusted[ip] = now + hours * 3600
+    db.set_state(TRUSTED_KEY, trusted)
+
+
+def trusted_ip(db: Database, ip: str) -> bool:
+    return (db.get_state(TRUSTED_KEY) or {}).get(ip, 0) > time.time()
+
+
+def untrust_ip(db: Database, ip: str) -> None:
+    trusted = db.get_state(TRUSTED_KEY) or {}
+    if trusted.pop(ip, None) is not None:
+        db.set_state(TRUSTED_KEY, trusted)

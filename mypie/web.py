@@ -901,7 +901,7 @@ def login_send(db_path: str, digits: int, client: dict) -> tuple[int, dict]:
     return 200, {"ok": True, "message": "텔레그램으로 로그인 코드를 보냈어요.", "wait": auth.RESEND_SEC}
 
 
-def login_verify(db_path: str, code: str, days: int, client: dict) -> tuple[int, dict, str | None]:
+def login_verify(db_path: str, code: str, days: int, client: dict, trust_hours: float = 24) -> tuple[int, dict, str | None]:
     db = _open(db_path)
     if not db:
         return 503, {"ok": False, "message": "봇이 아직 시작되지 않았어요."}, None
@@ -909,6 +909,8 @@ def login_verify(db_path: str, code: str, days: int, client: dict) -> tuple[int,
         with _login_lock:
             ok, message = auth.check_code(db, code)
             token = auth.create_session(db, days, client) if ok else None
+            if ok and trust_hours > 0:
+                auth.trust_ip(db, client["ip"], trust_hours)  # 같은 IP는 쿠키를 잃어도 하루 동안 다시 묻지 않는다
     finally:
         db.close()
     if not ok:
@@ -928,6 +930,7 @@ class Handler(BaseHTTPRequestHandler):
     login_enabled = True
     code_digits = 2
     session_days = 30
+    trust_hours = 24
     cfg: dict = {}
     COOKIE = "mypie_session"
 
@@ -947,7 +950,7 @@ class Handler(BaseHTTPRequestHandler):
             return True
         db = _open(self.db_path)
         try:
-            return bool(db) and auth.valid_session(db, self._cookie_token())
+            return bool(db) and (auth.valid_session(db, self._cookie_token()) or auth.trusted_ip(db, self._client()["ip"]))
         finally:
             if db:
                 db.close()
@@ -1049,17 +1052,19 @@ class Handler(BaseHTTPRequestHandler):
             elif route == "/api/login/send":
                 code, body = login_send(self.db_path, self.code_digits, self._client())
             elif route == "/api/login/verify":
-                code, body, token = login_verify(self.db_path, str(data.get("code", "")), self.session_days, self._client())
-                if token:
+                code, body, token = login_verify(self.db_path, str(data.get("code", "")), self.session_days, self._client(),
+                                                 self.trust_hours)
+                if token:  # Lax: 텔레그램 등 다른 앱의 링크로 열어도 쿠키가 붙는다 (Strict면 매번 다시 로그인)
                     cookie = (f"{self.COOKIE}={token}; Max-Age={self.session_days * 86400}; Path=/; "
-                              "HttpOnly; SameSite=Strict")
+                              "HttpOnly; SameSite=Lax")
             elif route == "/api/logout":
                 db = _open(self.db_path)
                 if db:
                     auth.end_session(db, self._cookie_token())
+                    auth.untrust_ip(db, self._client()["ip"])  # 로그아웃하면 이 IP도 다시 묻는다
                     db.close()
                 code, body = 200, {"ok": True, "message": "로그아웃했어요."}
-                cookie = f"{self.COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"
+                cookie = f"{self.COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
             elif route == "/api/telegram/start":
                 code, body = telegram_start(self.db_path, data)
             elif route == "/api/telegram/link":
@@ -1095,6 +1100,7 @@ def main() -> None:
     Handler.login_enabled = bool(cfg["web"]["login"])
     Handler.code_digits = max(2, min(int(cfg["web"]["code_digits"]), 8))
     Handler.session_days = int(cfg["web"]["session_days"])
+    Handler.trust_hours = float(cfg["web"]["trust_hours"])
     Handler.cfg = cfg
     Handler.stock_db_path = cfg["stock"]["db_path"]
     host, port = cfg["web"]["host"], int(cfg["web"]["port"])
