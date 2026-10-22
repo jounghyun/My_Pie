@@ -23,7 +23,6 @@ import re
 import signal
 import threading
 import time
-import uuid
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -35,7 +34,7 @@ from .stockbroker import LiveStockExecutor, PaperStockExecutor
 from .strategies import STOCK_STRATEGIES, DayPlan, create_strategy, strategy_params
 from .strategies.combo import check_rule, make_rule, normalize_rule, rule_label
 from .timeutil import KST, now_kst, ts
-from .vault import VaultBook, VaultError
+from .vault import VaultBook, VaultError, new_slot_id
 
 log = logging.getLogger("mypie.stock")
 
@@ -490,10 +489,14 @@ class StockBot:
             kind = "입금" if changes["cash"] > 0 else "출금"
             self.event("info", f"[실거래] 계좌에 {kind}(또는 직접 매매)이 있었어요 · {changes['cash']:+,.0f}원을 금고에 반영했어요",
                        notify=True)
-        names = {s.symbol: s.name for s in self.slots}
+        if changes["added"]:
+            self._load_slots()  # 봇이 모르는 주식을 모을 바이앤홀드 계좌를 새로 만들었다
+        slots = self.book.data["slots"]
         for sym, delta in changes["shares"].items():
-            what = f"원래 있던(또는 직접 산) {delta:,}주를 가져왔어요" if delta > 0 else f"{-delta:,}주가 밖에서 팔렸어요"
-            self.event("info", f"[실거래 {names.get(sym, sym)}] {what}", notify=True)
+            hold = next((slots[x]["name"] for x in slots if slots[x]["symbol"] == sym and self.book.is_hold(x)), sym)
+            what = (f"원래 있던(또는 직접 산) {delta:,}주를 '{hold}' 계좌(바이앤홀드)로 가져왔어요" if delta > 0
+                    else f"{sym} {-delta:,}주가 밖에서 팔렸어요 (바이앤홀드 계좌부터 뺐어요)")
+            self.event("info", f"[실거래] {what}", notify=True)
 
     # ---- 웹페이지 요청 ----
 
@@ -554,7 +557,7 @@ class StockBot:
             amount = float(r.get("amount") or 0)
             if amount > self.book.vault + 0.5:
                 raise VaultError(f"금고에 {self.book.vault:,.0f}원밖에 없어요")
-            sid = "k" + uuid.uuid4().hex[:6]
+            sid = new_slot_id()
             self.book.add_slot(sid, symbol, name, rule)
             self.book.set_stop(sid, stop)
             if amount > 0:

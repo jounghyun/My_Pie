@@ -122,7 +122,7 @@
 
   <!-- 종목 계좌 만들기 -->
   <section class="card" id="addBox" hidden>
-    <h2><span class="ico">➕</span>종목 계좌 만들기 <small>실거래면 계좌에 원래 있던 그 종목 주식도 이 계좌로 가져와요</small>
+    <h2><span class="ico">➕</span>종목 계좌 만들기 <small>같은 종목도 다른 전략으로 여러 개 만들 수 있어요 · 실거래면 원래 있던 주식은 그 종목의 바이앤홀드 계좌로 모아요</small>
       <button type="button" class="ghost small right" id="addClose">닫기</button></h2>
     <div class="addgrid">
       <label>종목 (이름이나 코드)
@@ -596,11 +596,14 @@ function renderResults(results) {
 function renderTrades(trades) {
   const body = $('trades'); body.innerHTML = '';
   $('tradesEmpty').hidden = !!(trades && trades.length);
+  // 계좌 이름: 같은 종목 계좌가 여럿일 수 있어서 매매한 계좌(slot)로 찾고, 예전 기록은 종목으로
+  const byId = Object.fromEntries(slots().map(x => [x.id, x.name]));
   const names = Object.fromEntries(slots().map(x => [x.symbol, x.name]));
+  const nameOf = (t) => byId[t.slot] || names[t.market] || t.market;
   for (const t of trades || []) {
     const tr = el('tr');
     cell(tr, t.ts.slice(5, 16), 'left');
-    cell(tr, names[t.market] || t.market, 'left');
+    cell(tr, nameOf(t), 'left');
     const side = cell(tr, t.side === 'buy' ? '매수' : '매도', 'side'); tone(side, t.side === 'buy' ? 1 : -1);
     cell(tr, won(t.price)); cell(tr, Math.round(t.volume).toLocaleString() + '주'); cell(tr, won(t.krw));
     const p = cell(tr, t.profit == null ? '-' : signedWon(t.profit)); tone(p, t.profit);
@@ -608,7 +611,7 @@ function renderTrades(trades) {
   }
   $('tradesSub').textContent = S.data.status ? (S.data.status.mode === 'live' ? '실거래' : '모의투자') : '';
   const newest = trades && trades[0] && trades[0].id;
-  if (S.seen != null && newest && newest !== S.seen) toast(`${trades[0].side === 'buy' ? '🔴 매수' : '🔵 매도'} ${names[trades[0].market] || trades[0].market}`, 'info');
+  if (S.seen != null && newest && newest !== S.seen) toast(`${trades[0].side === 'buy' ? '🔴 매수' : '🔵 매도'} ${nameOf(trades[0])}`, 'info');
   if (newest) S.seen = newest;
 }
 function renderEvents(events) {
@@ -933,7 +936,8 @@ function spark(curve) {
 function renderRankTable() {
   const body = $('ranks'); body.innerHTML = '';
   if (!simReady()) { $('rankHead').textContent = '같은 기간 전략 순위'; return; }
-  const r = S.sim, period = r.periods.find(p => p.days === r.days), x = slotOf(r.market), using = x ? slotRule(x) : null;
+  const r = S.sim, period = r.periods.find(p => p.days === r.days);
+  const usings = slots().filter(x => x.symbol === r.market).map(slotRule);  // 같은 종목 계좌가 여럿이면 모두
   const count = r.results.filter(v => !v.combo).length;
   $('rankHead').textContent = `같은 기간(최근 ${period ? period.label : r.days + '일'}) ${count}개 전략 순위 · ${r.rank_by === 'calmar' ? '위험 대비 수익 순' : '수익률 순'}`
                               + (r.stop_loss ? ` · 모두 ${stopText(r.stop_loss)} 적용` : '');
@@ -945,7 +949,7 @@ function renderRankTable() {
     const nm = cell(tr, v.label, 'left');
     if (v.combo) nm.prepend(el('span', { class: 'tag combo', text: '조합' }));
     if (g.stock_only) nm.append(el('span', { class: 'tagline', text: '주식 전용' }));
-    if (using && (v.combo ? sameRule(using, S.simSel.rule) : isSimpleRule(using) && using.strategy === v.name))
+    if (usings.some(u => v.combo ? sameRule(u, S.simSel.rule) : isSimpleRule(u) && u.strategy === v.name))
       nm.append(el('span', { class: 'tag', text: '사용 중' }));
     tone(cell(tr, pct(v.total_return * 100, 1)), v.total_return);
     tone(cell(tr, v.cagr == null ? '-' : pct(v.cagr * 100, 1)), v.cagr);

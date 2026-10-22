@@ -197,6 +197,22 @@ class VaultTest(TempDb):
         self.assertEqual(b.slot("a")["qty"], 1)
         self.assertAlmostEqual(b.slot("a")["cost"], 60_000)
 
+    def test_same_stock_in_several_accounts_and_outside_shares_go_to_buy_and_hold(self):
+        b = VaultBook(self.db, "book:live", 0)
+        b.add_slot("a", "005930", "삼성전자", "supertrend")
+        b.add_slot("b", "005930", "삼성전자", "ma_alignment")
+        self.assertEqual((b.slot("a")["name"], b.slot("b")["name"]), ("삼성전자", "삼성전자 2"))
+        b.slot("a").update(qty=4, cost=240_000, avg_price=60_000)        # 봇이 산 주식
+        changes = b.sync(100_000, {"005930": {"qty": 7, "name": "삼성전자"}}, {"005930": 60_000})
+        hold = changes["added"][0]                                       # 봇이 모르는 3주는 바이앤홀드 계좌로
+        self.assertEqual((b.slot(hold)["name"], b.is_hold(hold)), ("삼성전자 · 원래 있던 주식", True))
+        self.assertEqual([b.slot(x)["qty"] for x in ("a", "b", hold)], [4, 0, 3])
+        self.assertEqual(changes["shares"], {"005930": 3})
+        self.assertEqual(b.sync(100_000, {"005930": {"qty": 7}}, {"005930": 60_000})["added"], [])  # 다시 안 만든다
+        b.sync(100_000, {"005930": {"qty": 2}}, {"005930": 60_000})     # 밖에서 5주 팔림
+        self.assertEqual([b.slot(x)["qty"] for x in ("a", "b", hold)], [2, 0, 0])  # 바이앤홀드 3주부터, 나머지는 a에서
+        self.assertAlmostEqual(b.slot("a")["cost"], 120_000)
+
 
 class StockBotTest(TempDb):
     SYMBOL = "000660"
@@ -269,6 +285,20 @@ class StockBotTest(TempDb):
         self.request(6, action="strategy", slot=sid, strategy="ma_cross")  # 하나로 되돌리면 조합 칸은 지운다
         bot.step(at(DAY2, "09:05"))
         self.assertNotIn("buy", self.slot(bot))
+
+    def test_same_stock_can_have_several_accounts(self):
+        self.toss.set(self.SYMBOL, DAY1, 100_000)
+        bot = self.make_bot()
+        self.request(1, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="buy_and_hold", amount=200_000)
+        self.request(2, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="buy_and_hold", amount=300_000)
+        bot.step(at(DAY1, "08:30"))
+        self.assertEqual(sorted(s["name"] for s in bot.book.data["slots"].values()), ["SK하이닉스", "SK하이닉스 2"])
+        bot.step(at(DAY1, "09:01"))
+        rows = self.db.recent_trades()
+        self.assertEqual(sorted(r["volume"] for r in rows), [1, 2])      # 계좌마다 자기 잔액으로 (20만 원 → 1주, 30만 원 → 2주)
+        self.assertEqual({r["slot"] for r in rows}, set(bot.book.data["slots"]))  # 어느 계좌의 매매인지 남는다
+        status = self.db.get_state("status")
+        self.assertEqual(len(status["slots"]), 2)
 
     def test_nxt_stock_is_judged_on_regular_session_bars(self):
         prev = [candle("2026-10-21", 100_000, 120_000, 80_000, 110_000),   # NXT 종목 일봉 = 08:00~20:00 전체
