@@ -6,6 +6,7 @@
   - sell_stop 이탈 매도: 시가가 이미 아래면 시가, 아니면 sell_stop 가격
 """
 
+from . import stoploss
 from .strategies import STRATEGIES, Strategy
 
 WINDOW = 150         # plan()에 넘기는 과거 일봉 수 (봇과 같음)
@@ -23,10 +24,12 @@ SIM_PERIODS = {
 
 
 def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: int = WARMUP,
-             bars_per_year: float = 365, detail: bool = False, sell_cost: float = 0.0) -> dict:
+             bars_per_year: float = 365, detail: bool = False, sell_cost: float = 0.0, stop_loss: float = 0.0) -> dict:
     """candles: 완성된 봉 (오래된 것 → 최신). 시작 자금 1로 계산한다. bars_per_year: 1년에 봉이 몇 개인지 (일봉 365).
-    detail이면 줄이지 않은 자산 곡선과 매매 지점(fills: 몇 번째 봉에서 사고팔았나)도 돌려준다."""
+    detail이면 줄이지 않은 자산 곡선과 매매 지점(fills: 몇 번째 봉에서 사고팔았나)도 돌려준다.
+    stop_loss: 손절선 % (stoploss.py 규칙. 시작가에 산 봉에서도 지킨다)."""
     cash, coin, cost = 1.0, 0.0, 0.0
+    cut = False  # 손절 뒤 매수 신호가 한 번 꺼질 때까지 시작가 매수를 쉰다
     trade_returns: list[float] = []
     curve: list[float] = []
     fills: list[dict] = []
@@ -37,26 +40,35 @@ def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: i
         coin, cost, cash = cash / ((1 + fee_rate) * price), cash, 0.0
         fills.append({"i": len(curve), "side": "buy", "price": price})
 
-    def sell(price: float) -> None:
+    def sell(price: float, loss: bool = False) -> None:
         nonlocal cash, coin, cost
         cash = coin * price * (1 - fee_rate - sell_cost)  # sell_cost: 주식의 증권거래세처럼 팔 때만 붙는 비용
         trade_returns.append(cash / cost - 1)
-        fills.append({"i": len(curve), "side": "sell", "price": price, "return": cash / cost - 1})
+        fills.append({"i": len(curve), "side": "sell", "price": price, "return": cash / cost - 1,
+                      **({"stop_loss": True} if loss else {})})
         coin, cost = 0.0, 0.0
 
     for i in range(warmup, len(candles)):
         day = candles[i]
         plan = strategy.plan(candles[max(0, i - strategy.window):i], day["open"])
         bought = stopped = False
+        if cut and not plan.buy_at_open:
+            cut = False
 
         if coin and plan.sell_at_open:
             sell(day["open"])
-        elif not coin and plan.buy_at_open:
+        elif not coin and plan.buy_at_open and not cut:
             buy(day["open"])
             bought = True
 
-        if coin and not bought and plan.sell_stop is not None and day["low"] <= plan.sell_stop:
-            sell(min(day["open"], plan.sell_stop))
+        # 장중 이탈: 손절선(시작가에 산 봉이면 그 뒤의 저가라 같은 봉에서도)과 전략의 이탈 가격 중 높은 쪽에 먼저 닿는다
+        loss_line = stoploss.line(cost, coin, stop_loss)
+        strategy_stop = plan.sell_stop if coin and not bought else None
+        if loss_line is not None and day["low"] <= loss_line and (strategy_stop is None or loss_line >= strategy_stop):
+            sell(min(day["open"], loss_line), loss=True)
+            stopped = cut = True
+        elif strategy_stop is not None and day["low"] <= strategy_stop:
+            sell(min(day["open"], strategy_stop))
             stopped = True
         if not coin and not bought and not stopped and plan.buy_stop is not None and day["high"] >= plan.buy_stop:
             buy(max(day["open"], plan.buy_stop))
@@ -94,14 +106,14 @@ def score(result: dict, rank_by: str) -> float:
 
 def rank_strategies(candles: list[dict], fee_rate: float, rank_by: str = "return", bars_per_year: float = 365,
                     params: dict | None = None, warmup: int = WARMUP, detail: bool = False,
-                    sell_cost: float = 0.0, strategies: dict | None = None) -> list[dict]:
+                    sell_cost: float = 0.0, strategies: dict | None = None, stop_loss: float = 0.0) -> list[dict]:
     """모든 전략을 백테스트해서 순위대로 돌려준다. params: {전략이름: 파라미터}.
-    strategies: 전략 목록 (기본은 코인·주식 공통 STRATEGIES, 주식은 STOCK_STRATEGIES)."""
+    strategies: 전략 목록 (기본은 코인·주식 공통 STRATEGIES, 주식은 STOCK_STRATEGIES). stop_loss: 모두에 같은 손절선 %."""
     results = []
     for name, cls in (strategies or STRATEGIES).items():
         strategy = cls((params or {}).get(name))
         results.append({"name": name, "label": cls.label, "description": cls.description, "guide": cls.guide,
-                        **simulate(strategy, candles, fee_rate, warmup, bars_per_year, detail, sell_cost)})
+                        **simulate(strategy, candles, fee_rate, warmup, bars_per_year, detail, sell_cost, stop_loss)})
     results.sort(key=lambda r: score(r, rank_by), reverse=True)
     for rank, r in enumerate(results, 1):
         r["rank"] = rank
@@ -119,10 +131,10 @@ def period_bars(tf_minutes: int, days: int) -> int:
 
 def rank_period(candles: list[dict], bars: int, fee_rate: float, rank_by: str = "return",
                 bars_per_year: float = 365, params: dict | None = None, sell_cost: float = 0.0,
-                strategies: dict | None = None) -> list[dict]:
+                strategies: dict | None = None, stop_loss: float = 0.0) -> list[dict]:
     """최근 bars개 봉 동안만 굴려 본 순위 (전략 시뮬레이션). 그 앞의 봉은 지표 계산에만 쓴다."""
     history = min(history_needed(strategies), len(candles) - bars)
     if history < WARMUP:
         raise ValueError("이 기간을 시험하기엔 모아 둔 봉이 모자라요")
     return rank_strategies(candles[-(bars + history):], fee_rate, rank_by, bars_per_year, params,
-                           warmup=history, detail=True, sell_cost=sell_cost, strategies=strategies)
+                           warmup=history, detail=True, sell_cost=sell_cost, strategies=strategies, stop_loss=stop_loss)

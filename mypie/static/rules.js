@@ -72,6 +72,32 @@ function ruleBuilder(rule, options, onChange) {
   draw();
   return box;
 }
+// 손절선 고르기 (서버 mypie/stoploss.py): 켜면 '산 값보다 N% 떨어지면 팔기'. onChange(%), 끄면 0
+function stopField(pct, onChange) {
+  const box = el('div', { class: 'stopline', title: '산 값보다 이만큼 떨어지면 전략과 상관없이 팔아요. 판 뒤에는 매수 신호가 새로 날 때 다시 사요' });
+  const on = el('input', { type: 'checkbox', 'aria-label': '손절선 쓰기' });
+  const num = el('input', { type: 'number', min: 1, max: 50, step: 0.5, inputmode: 'decimal', 'aria-label': '손절선 %' });
+  on.checked = pct > 0;
+  num.value = pct > 0 ? pct : 10;
+  num.disabled = !on.checked;
+  const fire = () => {
+    num.disabled = !on.checked;
+    onChange(on.checked ? Math.min(50, Math.max(1, Number(num.value) || 10)) : 0);
+  };
+  on.onchange = fire;
+  num.oninput = fire;
+  box.set = (p) => {  // 밖에서 값 바꾸기 (입력 중이면 건드리지 않는다)
+    if (document.activeElement === num) return;
+    on.checked = p > 0;
+    if (p > 0) num.value = p;
+    num.disabled = !on.checked;
+  };
+  box.append(el('label', { class: 'toggle' }, on, el('span', { class: 'rule-tag stop', text: '손절선' })),
+             el('span', { text: '산 값보다 −' }), num, el('span', { text: '% 떨어지면 팔기' }));
+  return box;
+}
+function stopText(pct) { return pct > 0 ? `손절선 −${pct}%` : ''; }
+
 function ruleFields(r) {  // 저장할 값: 간단한 규칙(같은 전략 하나)이면 예전처럼 전략 이름만 (서버 rule_fields와 같음)
   r = normalizeRule(r);
   return isSimpleRule(r) ? { strategy: r.strategy }

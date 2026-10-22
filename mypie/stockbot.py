@@ -28,7 +28,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from . import backtest, buyhold, krx, telegram, toss
+from . import backtest, buyhold, krx, stoploss, telegram, toss
 from .config import load_config
 from .db import Database
 from .stockbroker import LiveStockExecutor, PaperStockExecutor
@@ -86,6 +86,7 @@ class StockSlot:
         self.rule = normalize_rule(entry)  # 살 때·팔 때 전략 (예전 계좌는 둘 다 같은 전략 하나)
         self.strategy = make_rule(self.rule, lambda n: create_strategy(n, {**strategy_params(cfg, n), "_bar": "일"},
                                                                        STOCK_STRATEGIES))
+        self.stop_loss = float(entry.get("stop_loss") or 0)  # 손절선 % (0이면 안 씀)
         self.plan: DayPlan | None = None
         self.plan_day: str | None = None
 
@@ -301,14 +302,27 @@ class StockBot:
                 self._set_sstate(s.id, open_done_day=today)
                 sold.add(s.id)
         for s in todo:
+            cut = self._sstate(s).get("cut")
+            if cut and not s.plan.buy_at_open:
+                cut = False  # 손절 뒤 매수 신호가 한 번 꺼졌다 → 다음 신호부터 다시 산다
+                self._set_sstate(s.id, cut=False)
             # 방금 판 계좌는 같은 장 시작에 다시 사지 않는다 (살 때·팔 때 조합에서 사자·팔자가 같이 켜진 경우. 시뮬레이션과 같은 규칙)
-            if s.id not in sold and not self._holding(s) and s.plan.buy_at_open:
+            if s.id not in sold and not cut and not self._holding(s) and s.plan.buy_at_open:
                 self._buy(s, today, f"매수 신호 · {s.plan.note}")
             self._set_sstate(s.id, open_done_day=today)  # 재시작해도 장 시작 매매를 두 번 하지 않게
+
+    def _loss_line(self, slot: StockSlot) -> float | None:
+        s = self.book.slot(slot.id)
+        return stoploss.line(s["cost"], s["qty"], slot.stop_loss)
 
     def _intraday(self, slot: StockSlot, today: str) -> None:
         plan, st, price = slot.plan, self._sstate(slot), self.prices[slot.symbol]
         if self._holding(slot):
+            loss = self._loss_line(slot)  # 손절선은 산 직후에도 지킨다
+            if loss is not None and price <= loss:
+                self._sell(slot, f"{stoploss.text(slot.stop_loss)} ({loss:,.0f}원) 이탈")
+                self._set_sstate(slot.id, last_stop_day=today, cut=True)
+                return
             if plan.sell_stop is not None and st.get("last_buy_day") != today and price <= plan.sell_stop:
                 self._sell(slot, f"{plan.sell_stop:,.0f}원 이탈")
                 self._set_sstate(slot.id, last_stop_day=today)
@@ -342,7 +356,7 @@ class StockBot:
             return
         trade = self.book.apply_buy(slot.id, qty, fill_price, fee, reason)
         self.executor.clear_pending()
-        self._set_sstate(slot.id, last_buy_day=today)
+        self._set_sstate(slot.id, last_buy_day=today, cut=False)
         self.db.add_trade(self.executor.mode, slot.symbol, trade)
         self.event("info", f"🔴 {self._tag(slot)}매수 {qty:,}주 @ {fill_price:,.0f}원 ({trade['krw']:,.0f}원) · {reason}",
                    notify=True)
@@ -463,8 +477,9 @@ class StockBot:
             if not SYMBOL_PATTERN.match(symbol):
                 raise VaultError(f"잘못된 종목 코드예요: {symbol}")
             rule, problem = check_rule(r, STOCK_STRATEGIES)  # 살 때·팔 때 전략
-            if problem:
-                raise VaultError(problem)
+            stop, stop_problem = stoploss.parse(r.get("stop_loss"))
+            if problem or stop_problem:
+                raise VaultError(problem or stop_problem)
             if len(self.book.data["slots"]) >= MAX_SLOTS:
                 raise VaultError(f"종목 계좌는 {MAX_SLOTS}개까지 만들 수 있어요")
             name = str(r.get("name") or symbol)[:40]
@@ -473,11 +488,13 @@ class StockBot:
                 raise VaultError(f"금고에 {self.book.vault:,.0f}원밖에 없어요")
             sid = "k" + uuid.uuid4().hex[:6]
             self.book.add_slot(sid, symbol, name, rule)
+            self.book.set_stop(sid, stop)
             if amount > 0:
                 self.book.transfer(sid, amount)
             self._load_slots()
             self.last_sync = 0.0  # 실거래면 원래 있던 이 종목 주식을 바로 가져오게
-            return f"{name} 종목 계좌를 만들었어요 · {self._rule_text(rule)}" + (f" · 금고에서 {amount:,.0f}원" if amount > 0 else "")
+            return (f"{name} 종목 계좌를 만들었어요 · {self._rule_text(rule)}" + (f" · {stoploss.text(stop)}" if stop else "")
+                    + (f" · 금고에서 {amount:,.0f}원" if amount > 0 else ""))
         sid = str(r["slot"])
         if not self.book.has(sid):
             raise VaultError("그 종목 계좌가 없어요")
@@ -489,12 +506,19 @@ class StockBot:
             return f"{name} 종목 계좌를 지웠어요" + (f" · 잔액 {moved:,.0f}원은 금고로" if moved else "")
         if action == "strategy":
             rule, problem = check_rule(r, STOCK_STRATEGIES)
-            if problem:
-                raise VaultError(problem)
+            stop, stop_problem = stoploss.parse(r.get("stop_loss"))
+            if problem or stop_problem:
+                raise VaultError(problem or stop_problem)
+            same_rule = normalize_rule(self.book.slot(sid)) == rule
             self.book.set_rule(sid, rule)
-            self._drop_sstate(sid)  # 새 전략이 처음부터 판단한다 (장중이면 지금, 아니면 다음 장 시작 때)
+            self.book.set_stop(sid, stop)
+            if not same_rule:
+                self._drop_sstate(sid)  # 새 전략이 처음부터 판단한다 (장중이면 지금, 아니면 다음 장 시작 때)
             self._load_slots()
-            return f"{name} 전략을 바꿨어요 · {self._rule_text(rule)} · 주식은 그대로 두고 새 전략이 판단해요"
+            if same_rule:
+                return f"{name} 손절선을 바꿨어요 · " + (stoploss.text(stop) if stop else "안 씀")
+            return (f"{name} 전략을 바꿨어요 · {self._rule_text(rule)}" + (f" · {stoploss.text(stop)}" if stop else "")
+                    + " · 주식은 그대로 두고 새 전략이 판단해요")
         if action == "transfer":
             s = self.book.slot(sid)
             if r.get("all"):
@@ -577,19 +601,23 @@ class StockBot:
         price = self.prices.get(slot.symbol)
         fresh = plan is not None and slot.plan_day == today and sess in ("open", "closing")
         if s["qty"] > 0:
+            loss = self._loss_line(slot)
+            cut = f" · {stoploss.text(slot.stop_loss)} {loss:,.0f}원" if loss is not None else ""
             if not fresh:
-                return "보유 중 · 다음 장 시작(09:00)에 다시 판단"
+                return "보유 중 · 다음 장 시작(09:00)에 다시 판단" + cut
             if slot.strategy.exit_next_open:
-                return "다음 장 시작 때 매도 예정"
+                return "다음 장 시작 때 매도 예정" + cut
             if plan.sell_stop is not None:
-                return f"{plan.sell_stop:,.0f}원 아래로 내려가면 매도"
-            return "보유 유지 · 매도 신호가 나면 다음 장 시작 때 매도"
+                return f"{plan.sell_stop:,.0f}원 아래로 내려가면 매도" + cut
+            return "보유 유지 · 매도 신호가 나면 다음 장 시작 때 매도" + cut
         if price and s["cash"] < price:
             return f"잔액이 1주 가격({price:,.0f}원)보다 적어요 · 금고에서 이체해 주세요"
         if not fresh:
             return "다음 장 시작(09:00)에 판단해요"
         if st.get("last_buy_day") == today or st.get("last_stop_day") == today:
             return "오늘 매매 완료 · 다음 장에 다시 판단"
+        if st.get("cut"):
+            return "손절 뒤 쉬는 중 · 매수 신호가 한 번 꺼졌다가 다시 켜지면 사요"
         if plan.buy_stop is not None:
             return f"{plan.buy_stop:,.0f}원 이상 오르면 매수"
         return "매수 신호를 기다리는 중 · 매일 09:00 판단"
@@ -621,6 +649,7 @@ class StockBot:
                                  "description": slot.strategy.description, "guide": slot.strategy.guide,
                                  "exit_next_open": slot.strategy.exit_next_open},
                     "rule": slot.rule,  # 살 때·팔 때 전략
+                    "stop_loss": slot.stop_loss, "stop_price": self._loss_line(slot),  # 손절선 (들고 있을 때만 값)
                     "plan": asdict(slot.plan) if slot.plan and slot.plan_day == today else None,
                     "state_text": self._state_text(slot, sess, today), "holding": s["qty"] > 0,
                     "cash": s["cash"], "qty": s["qty"], "avg_price": s["avg_price"], "cost": s["cost"],

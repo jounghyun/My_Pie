@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import auth, backtest, krx, pin, telegram, timeframes, toss, upbit
+from . import auth, backtest, krx, pin, stoploss, telegram, timeframes, toss, upbit
 from .bot import validate_slots
 from .broker import MIN_ORDER_KRW
 from .config import load_config
@@ -178,7 +178,7 @@ STOCK_SIM_PERIODS = [(30, "1달"), (90, "3달"), (180, "6달"), (365, "1년"), (
 
 
 def build_simulation(db_path: str, cfg: dict, market: str, tf: str, days: int, strategy: str,
-                     rule: dict | None = None) -> dict:
+                     rule: dict | None = None, stop_loss: float = 0.0) -> dict:
     """코인 전략 시뮬레이션: 한 종목·판단 주기로 최근 days일 동안 모든 전략을 굴려 본 순위와, 고른 전략의 매매 지점.
     봇이 모아 둔 봉으로 계산한다. 봉이 모자라거나 오래됐으면 need_data / stale로 알려서 봇에게 받아 달라고 하게 한다."""
     if not MARKET_PATTERN.match(market) or tf not in timeframes.TIMEFRAMES:
@@ -189,11 +189,11 @@ def build_simulation(db_path: str, cfg: dict, market: str, tf: str, days: int, s
                      fee=float(cfg["paper"]["fee_rate"]), sell_cost=0.0, rank_by=cfg["backtest"]["rank_by"],
                      per_year=timeframes.bars_per_year(tf), cfg=cfg,
                      is_stale=lambda last: timeframes.key_to_utc(last) + timedelta(minutes=minutes * 2) < now_kst(),
-                     rule=rule)
+                     rule=rule, stop_loss=stop_loss)
 
 
 def build_stock_simulation(db_path: str, cfg: dict, symbol: str, days: int, strategy: str,
-                           rule: dict | None = None) -> dict:
+                           rule: dict | None = None, stop_loss: float = 0.0) -> dict:
     """주식 전략 시뮬레이션 (일봉, 주식용 전략 목록, 증권거래세 반영)."""
     if not STOCK_SYMBOL.match(symbol):
         return {"market": symbol, "tf": "1d", "days": days, "periods": [], "ready": False, "message": "잘못된 종목이에요."}
@@ -201,7 +201,14 @@ def build_stock_simulation(db_path: str, cfg: dict, symbol: str, days: int, stra
     return _simulate(db_path, symbol, "1d", days, strategy, periods=STOCK_SIM_PERIODS,
                      bars_of=lambda d: d * 250 // 365, strategies=STOCK_STRATEGIES, fee=float(sc["fee_rate"]),
                      sell_cost=float(sc["sell_tax"]), rank_by=sc.get("rank_by", "return"), per_year=250, cfg=cfg,
-                     is_stale=lambda last: last < krx.previous_trading_day(now_kst().date()).isoformat(), rule=rule)
+                     is_stale=lambda last: last < krx.previous_trading_day(now_kst().date()).isoformat(), rule=rule,
+                     stop_loss=stop_loss)
+
+
+def _query_stop(query: dict) -> float:
+    """시뮬레이션 주소의 손절선 % (?stop=10). 없거나 잘못되면 0 (안 씀)."""
+    stop, problem = stoploss.parse(query.get("stop", ["0"])[0])
+    return 0.0 if problem else stop
 
 
 def _query_rule(query: dict, registry: dict) -> dict | None:
@@ -217,7 +224,7 @@ def _query_rule(query: dict, registry: dict) -> dict | None:
 
 def _simulate(db_path: str, market: str, tf: str, days: int, strategy: str, *, periods, bars_of, strategies: dict,
               fee: float, sell_cost: float, rank_by: str, per_year: float, cfg: dict, is_stale,
-              rule: dict | None = None) -> dict:
+              rule: dict | None = None, stop_loss: float = 0.0) -> dict:
     out = {"market": market, "tf": tf, "days": days, "periods": [], "ready": False}
     db = _open(db_path)
     if not db:
@@ -238,12 +245,12 @@ def _simulate(db_path: str, market: str, tf: str, days: int, strategy: str, *, p
     out["stale"] = is_stale(last)  # 끝난 봉이 하나라도 빠졌다
 
     bars = bars_of(days)
-    key = (id(strategies), market, tf, days, last)
+    key = (id(strategies), market, tf, days, last, stop_loss)
     with _sim_lock:  # 파이 3B에선 몇 초 걸리니 같은 계산을 겹쳐 하지 않는다
         results = _sim_cache.get(key)
         if results is None:
             params = {name: strategy_params(cfg, name) for name in strategies}
-            results = backtest.rank_period(candles, bars, fee, rank_by, per_year, params, sell_cost, strategies)
+            results = backtest.rank_period(candles, bars, fee, rank_by, per_year, params, sell_cost, strategies, stop_loss)
             _sim_cache[key] = results
             while len(_sim_cache) > SIM_CACHE_SIZE:
                 _sim_cache.pop(next(iter(_sim_cache)))
@@ -256,16 +263,26 @@ def _simulate(db_path: str, market: str, tf: str, days: int, strategy: str, *, p
                 made = make_rule(rule, lambda n: strategies[n](params.get(n)))
                 warm = min(history, len(candles) - bars)
                 combo = {"name": "combo", "label": made.label,
-                         **backtest.simulate(made, candles[-(bars + warm):], fee, warm, per_year, True, sell_cost)}
+                         **backtest.simulate(made, candles[-(bars + warm):], fee, warm, per_year, True, sell_cost,
+                                            stop_loss)}
                 ranked = sorted([r for r in results] + [combo], key=lambda r: backtest.score(r, rank_by), reverse=True)
                 combo["rank"] = next(i for i, r in enumerate(ranked, 1) if r is combo)
                 _sim_cache[ckey] = combo
+        hold = next((r for r in results if r["name"] == "buy_and_hold"), None)
+        if stop_loss and hold is not None:  # 비교선 '그냥 들고 있었다면'은 손절 없이
+            hkey = key + ("hold",)
+            hold = _sim_cache.get(hkey)
+            if hold is None:
+                warm = min(history, len(candles) - bars)
+                hold = _sim_cache[hkey] = backtest.simulate(strategies["buy_and_hold"](None), candles[-(bars + warm):],
+                                                            fee, warm, per_year, True, sell_cost)
     window = candles[-bars:]
     chosen = combo or next((r for r in results if r["name"] == strategy), results[0])
-    hold = next((r for r in results if r["name"] == "buy_and_hold"), chosen)
+    hold = hold or chosen
     shown = ([{**combo, "combo": True}] if combo else []) + results  # 조합은 맨 위에 (순위는 '그 자리라면 몇 위')
     return {
-        **out, "ready": True, "rank_by": rank_by,
+        **out, "ready": True, "rank_by": rank_by, "stop_loss": stop_loss,
+        "hold": {"total_return": hold["total_return"], "mdd": hold["mdd"]},
         "from": window[0]["day"], "to": last, "bars": bars,
         "results": [{k: v for k, v in r.items() if k not in ("detail", "description", "guide")} for r in shown],
         "detail": {"name": chosen["name"], "keys": [c["day"] for c in window], "close": [c["close"] for c in window],
@@ -496,15 +513,21 @@ def request_stock(stock_db: str, main_db: str, data: dict) -> tuple[int, dict]:
             rule, problem = check_rule(data, STOCK_STRATEGIES)  # 살 때·팔 때 전략
             if problem:
                 return 400, {"ok": False, "message": "전략을 골라 주세요."}
+            stop, problem = stoploss.parse(data.get("stop_loss"))
+            if problem:
+                return 400, {"ok": False, "message": problem}
             request.update(symbol=symbol, name=str(data.get("name") or symbol)[:40], **rule_fields(rule),
-                           amount=max(0.0, float(data.get("amount") or 0)))
+                           stop_loss=stop, amount=max(0.0, float(data.get("amount") or 0)))
         elif action in ("remove", "strategy", "transfer"):
             request["slot"] = str(data.get("slot", ""))[:20]
             if action == "strategy":
                 rule, problem = check_rule(data, STOCK_STRATEGIES)
                 if problem:
                     return 400, {"ok": False, "message": "전략을 골라 주세요."}
-                request.update(rule_fields(rule))
+                stop, problem = stoploss.parse(data.get("stop_loss"))
+                if problem:
+                    return 400, {"ok": False, "message": problem}
+                request.update(rule_fields(rule), stop_loss=stop)
             if action == "transfer":
                 direction = "out" if data.get("direction") == "out" else "in"
                 request.update(direction=direction, all=bool(data.get("all")))
@@ -1022,7 +1045,8 @@ class Handler(BaseHTTPRequestHandler):
                               query.get("tf", ["1d"])[0])),
             "/api/simulate": lambda: build_simulation(self.db_path, self.cfg, query.get("market", ["KRW-BTC"])[0],
                                                       query.get("tf", ["1d"])[0], int(query.get("days", ["0"])[0] or 0),
-                                                      query.get("strategy", [""])[0], _query_rule(query, STRATEGIES)),
+                                                      query.get("strategy", [""])[0], _query_rule(query, STRATEGIES),
+                                                      _query_stop(query)),
             "/api/stats": lambda: build_stats(self.db_path),
             "/api/system": lambda: build_system(self.db_path),
             "/api/stock/status": lambda: build_stock_payload(self.stock_db_path, self.db_path),
@@ -1037,7 +1061,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/stock/simulate": lambda: build_stock_simulation(self.stock_db_path, self.cfg, query.get("symbol", [""])[0],
                                                                   int(query.get("days", ["0"])[0] or 0),
                                                                   query.get("strategy", [""])[0],
-                                                                  _query_rule(query, STOCK_STRATEGIES)),
+                                                                  _query_rule(query, STOCK_STRATEGIES), _query_stop(query)),
         }
         if route in builders:
             try:

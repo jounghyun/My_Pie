@@ -261,6 +261,31 @@ class StockBotTest(TempDb):
         bot.step(at(DAY2, "09:05"))
         self.assertNotIn("buy", self.slot(bot))
 
+    def test_stop_loss_sells_intraday_and_waits_for_a_fresh_signal(self):
+        self.toss.set(self.SYMBOL, DAY1, 100_000)
+        bot = self.make_bot()
+        self.request(1, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="buy_and_hold", amount=350_000,
+                     stop_loss=10)
+        bot.step(at(DAY1, "08:30"))
+        bot.step(at(DAY1, "09:01"))
+        self.assertEqual(self.trades(), [("buy", self.SYMBOL, 3)])
+        self.assertEqual(self.slot(bot)["stop_loss"], 10)
+        self.toss.quotes_[self.SYMBOL]["price"] = 89_000                 # 손절선 약 90,000원 아래로 (산 날이어도 지킨다)
+        bot.step(at(DAY1, "10:00"))
+        self.assertEqual([t[0] for t in self.trades()], ["buy", "sell"])
+        self.toss.set(self.SYMBOL, DAY2, 95_000)
+        bot.step(at(DAY2, "09:01"))                                      # 매수 신호가 한 번 꺼질 때까지 다시 안 산다
+        bot.step(at(DAY2, "09:02"))
+        self.assertEqual(len(self.trades()), 2)
+        sid = next(iter(bot.book.data["slots"]))
+        self.request(2, action="strategy", slot=sid, strategy="buy_and_hold", stop_loss=0)
+        bot.step(at(DAY2, "09:03"))
+        self.assertNotIn("stop_loss", self.slot(bot))
+        self.assertIn("손절선을 바꿨어요", self.results()[-1][1])
+        self.request(3, action="strategy", slot=sid, strategy="buy_and_hold", stop_loss=0.2)
+        bot.step(at(DAY2, "09:04"))
+        self.assertFalse(self.results()[-1][0])                          # 너무 작은 손절선은 받지 않는다
+
     def test_sold_account_is_not_bought_back_at_the_same_open(self):
         self.toss.set(self.SYMBOL, DAY1, 100_000)
         bot = self.make_bot()
@@ -451,6 +476,7 @@ class StockWebTest(TempDb):
         with mock.patch("mypie.toss.load_credentials", return_value=None):
             self.assertEqual(self.control(action="mode", mode="live", confirm_live=True)[0], 400)  # 키 없음
         self.assertEqual(self.control(action="strategy", slot="k1", strategy="rsi", sell=["nope"])[0], 400)
+        self.assertEqual(self.control(action="add", symbol="005930", strategy="rsi", stop_loss=0.2)[0], 400)  # 손절선 1~50%
         self.assertEqual(self.control(action="strategy", slot="k1", strategy="rsi", buy=["rsi", "disparity"], buy_op="or",
                                       sell=["ma_cross"])[0], 200)
         queued = [r for _, r in self.db.states("request:") if r["action"] == "strategy"][0]

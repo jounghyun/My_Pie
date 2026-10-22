@@ -68,6 +68,15 @@ class VaultBook:
         s.update(rule_fields(rule))
         self.save()
 
+    def set_stop(self, sid: str, pct: float) -> None:
+        """손절선 % (0이면 안 씀)."""
+        s = self.slot(sid)
+        if pct:
+            s["stop_loss"] = pct
+        else:
+            s.pop("stop_loss", None)
+        self.save()
+
     def remove_slot(self, sid: str) -> float:
         """주식이 없을 때만 지운다. 남은 잔액은 금고로. 옮긴 금액을 돌려준다."""
         s = self.slot(sid)

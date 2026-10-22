@@ -25,7 +25,7 @@ import uuid
 from dataclasses import asdict
 from datetime import timedelta
 
-from . import backtest, buyhold, network, reports, sshwatch, telegram, timeframes, upbit
+from . import backtest, buyhold, network, reports, sshwatch, stoploss, telegram, timeframes, upbit
 from .broker import MIN_ORDER_KRW, Book, LiveExecutor, PaperExecutor, sync_full
 from .config import load_config
 from .db import Database
@@ -59,6 +59,7 @@ class Slot:
         self.rule = normalize_rule(conf)  # 살 때·팔 때 전략 (예전 설정은 둘 다 같은 전략 하나)
         bar = timeframes.TIMEFRAMES[self.tf]["bar"]
         self.strategy = make_rule(self.rule, lambda n: create_strategy(n, {**strategy_params(cfg, n), "_bar": bar}))
+        self.stop_loss = float(conf.get("stop_loss") or 0)  # 손절선 % (0이면 안 씀)
         self.plan: DayPlan | None = None
         self.plan_day: str | None = None  # 계획을 세운 봉의 키 (일봉이면 날짜)
 
@@ -72,7 +73,7 @@ class Slot:
 
     def conf(self) -> dict:
         return {"id": self.id, "market": self.market, **rule_fields(self.rule), "tf": self.tf,
-                "weight": self.weight}
+                "weight": self.weight, **({"stop_loss": self.stop_loss} if self.stop_loss else {})}
 
 
 def ranking_key(market: str, tf: str) -> str:
@@ -109,9 +110,12 @@ def validate_slots(raw) -> tuple[list[dict] | None, str | None]:
             return None, f"알 수 없는 판단 주기: {tf}"
         if not 0 <= weight <= 100:  # 0%는 '지켜보기만 하는 줄' (나중에 비중만 올리면 바로 매매)
             return None, f"{market}의 비중은 0~100% 사이로 넣어 주세요"
+        stop, problem = stoploss.parse(item.get("stop_loss"))
+        if problem:
+            return None, f"{market}: {problem}"
         seen.add(market)
         slots.append({"id": str(item.get("id") or ""), "market": market, **rule_fields(rule), "tf": tf,
-                      "weight": weight})
+                      "weight": weight, **({"stop_loss": stop} if stop else {})})
     total = sum(s["weight"] for s in slots)
     if total > 100.0001:
         return None, f"비중 합계가 {total:g}%예요. 100% 이하로 맞춰 주세요"
@@ -367,14 +371,27 @@ class Bot:
                 self._set_sstate(s.id, open_done_day=bars[s.id])
                 sold.add(s.id)
         for s in todo:
+            cut = self._sstate(s).get("cut")
+            if cut and not s.plan.buy_at_open:
+                cut = False  # 손절 뒤 매수 신호가 한 번 꺼졌다 → 다음 신호부터 다시 산다
+                self._set_sstate(s.id, cut=False)
             # 방금 판 줄은 같은 봉 시작에 다시 사지 않는다 (살 때·팔 때 조합에서 사자·팔자가 같이 켜진 경우. 시뮬레이션과 같은 규칙)
-            if s.id not in sold and not self._holding(s, prices[s.market]) and s.plan.buy_at_open:
+            if s.id not in sold and not cut and not self._holding(s, prices[s.market]) and s.plan.buy_at_open:
                 self._buy(s, prices[s.market], bars[s.id], f"매수 신호 · {s.plan.note}")
             self._set_sstate(s.id, open_done_day=bars[s.id])  # 재시작해도 봉 시작 매매를 두 번 하지 않게
+
+    def _loss_line(self, slot: Slot) -> float | None:
+        b = self.book.slot(slot.id, slot.market)
+        return stoploss.line(b["cost"], b["coin"], slot.stop_loss)
 
     def _intraday(self, slot: Slot, price: float, bar: str) -> None:
         plan, st = slot.plan, self._sstate(slot)
         if self._holding(slot, price):
+            loss = self._loss_line(slot)  # 손절선은 산 직후에도 지킨다
+            if loss is not None and price <= loss:
+                self._sell(slot, price, f"{stoploss.text(slot.stop_loss)} ({loss:,.0f}원) 이탈")
+                self._set_sstate(slot.id, last_stop_day=bar, cut=True)
+                return
             if plan.sell_stop is not None and st.get("last_buy_day") != bar and price <= plan.sell_stop:
                 self._sell(slot, price, f"{plan.sell_stop:,.0f}원 이탈")
                 self._set_sstate(slot.id, last_stop_day=bar)
@@ -405,7 +422,7 @@ class Bot:
         trade = self.book.apply_buy(slot.id, volume, funds, fee, reason)
         self.executor.clear_pending()
         if not topup:  # 추가 매수는 '오늘 산 날'로 치지 않는다 (손절 규칙이 그대로 살아 있게)
-            self._set_sstate(slot.id, last_buy_day=day)
+            self._set_sstate(slot.id, last_buy_day=day, cut=False)
         self.db.add_trade(self.executor.mode, slot.market, trade)
         self.event("info", f"🔴 {self._tag(slot)}매수 {trade['volume']:.8g} @ {trade['price']:,.0f}원 "
                            f"({trade['krw']:,.0f}원) · {reason}", notify=True)
@@ -583,6 +600,7 @@ class Bot:
             account = "실거래(계좌 전액)" if budget == "all" else f"실거래(한도 {budget:,.0f}원)"
         parts = ", ".join(f"{s.coin} {s.strategy.label}"
                           f"{'' if s.tf == '1d' else '(' + timeframes.TIMEFRAMES[s.tf]['short'] + ')'} {s.weight:g}%"
+                          f"{' ' + stoploss.text(s.stop_loss) if s.stop_loss else ''}"
                           for s in self.slots)
         return f"{account} · {parts}"
 
@@ -665,13 +683,17 @@ class Bot:
         if slot.weight <= 0 and not self._holding(slot, price):
             return "비중 0% · 지켜보기만 해요 (비중을 올리면 이 전략대로 사고팔아요)"
         if self._holding(slot, price):
+            loss = self._loss_line(slot)
+            cut = f" · {stoploss.text(slot.stop_loss)} {loss:,.0f}원" if loss is not None else ""
             if slot.strategy.exit_next_open:
-                return "내일 09시에 매도 예정" if daily else f"다음 봉 시작({at})에 매도 예정"
+                return ("내일 09시에 매도 예정" if daily else f"다음 봉 시작({at})에 매도 예정") + cut
             if plan.sell_stop is not None:
-                return f"{plan.sell_stop:,.0f}원 아래로 내려가면 매도"
-            return "보유 유지 · 매도 신호가 나면 " + ("09시에 매도" if daily else "다음 봉 시작에 매도")
+                return f"{plan.sell_stop:,.0f}원 아래로 내려가면 매도" + cut
+            return "보유 유지 · 매도 신호가 나면 " + ("09시에 매도" if daily else "다음 봉 시작에 매도") + cut
         if st.get("last_buy_day") == bar or st.get("last_stop_day") == bar:
             return "오늘 매매 완료 · 내일 다시 판단" if daily else f"이번 봉 매매 완료 · {at}에 다시 판단"
+        if st.get("cut"):
+            return "손절 뒤 쉬는 중 · 매수 신호가 한 번 꺼졌다가 다시 켜지면 사요"
         if plan.buy_stop is not None:
             return f"{plan.buy_stop:,.0f}원 이상 오르면 매수"
         return "매수 신호를 기다리는 중 · " + ("매일 09시 판단" if daily else f"다음 판단 {at}")
@@ -700,6 +722,7 @@ class Bot:
                 "strategy": {"name": s.strategy.name, "label": s.strategy.label, "description": s.strategy.description,
                              "guide": s.strategy.guide, "exit_next_open": s.strategy.exit_next_open},
                 "rule": s.rule,  # 살 때·팔 때 전략
+                "stop_loss": s.stop_loss, "stop_price": self._loss_line(s) if holding else None,  # 손절선
                 "plan": asdict(s.plan) if s.plan else None,
                 "state_text": self._state_text(s, price),
                 "holding": holding,

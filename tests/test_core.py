@@ -20,13 +20,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from mypie import auth, backtest, indicators, keys, krx, pin, reports, sshwatch, telegram, timeframes, upbit, web
+from mypie import auth, backtest, indicators, keys, krx, pin, reports, sshwatch, stoploss, telegram, timeframes, upbit, web
 from mypie.bot import Bot, validate_slots
 from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
 from mypie.db import Database
 from mypie.strategies import STRATEGIES, create_strategy, strategy_params
-from mypie.strategies.base import DayPlan, render_text
+from mypie.strategies.base import DayPlan, Strategy, render_text
 from mypie.strategies.combo import check_rule, make_rule, normalize_rule, rule_fields
 from mypie.timeutil import KST, trading_day
 from mypie.upbit import OrderRejected, UpbitError, make_token
@@ -302,6 +302,54 @@ class BacktestTest(unittest.TestCase):
         self.assertTrue(hold["detail"]["holding"])
         with self.assertRaises(ValueError):                             # 지표 계산용 앞부분이 모자라면 못 한다
             backtest.rank_period(candles[:100], 90, 0.0005)
+
+
+class Script(Strategy):
+    """정해 둔 순서대로 '보유/비보유'를 말하는 시험용 전략."""
+    name = label = "script"
+    window = 1
+
+    def __init__(self, wants):
+        super().__init__()
+        self.wants = iter(wants)
+
+    def plan(self, history, today_open):
+        want = next(self.wants)
+        return DayPlan(buy_at_open=want, sell_at_open=not want)
+
+
+class StopLossTest(unittest.TestCase):
+    def test_parse_and_line(self):
+        self.assertEqual(stoploss.parse(None), (0.0, None))              # 안 씀
+        self.assertEqual(stoploss.parse("10"), (10.0, None))
+        self.assertIsNotNone(stoploss.parse(0.5)[1])                    # 너무 작으면 잡음에도 팔려서 막는다
+        self.assertIsNotNone(stoploss.parse(60)[1])
+        self.assertIsNotNone(stoploss.parse("x")[1])
+        self.assertAlmostEqual(stoploss.line(1000, 10, 10), 90)          # 1개 100원에 샀으면 90원
+        self.assertIsNone(stoploss.line(1000, 10, 0))
+        self.assertIsNone(stoploss.line(0, 0, 10))
+
+    def test_backtest_cuts_and_waits_for_a_fresh_signal(self):
+        bars = [candle("d0", 100, 100, 100, 100), candle("d1", 100, 101, 99, 100),
+                candle("d2", 100, 100, 80, 85),                          # 손절선(약 90원) 아래로
+                candle("d3", 85, 86, 84, 85), candle("d4", 85, 86, 84, 85), candle("d5", 85, 86, 84, 85)]
+        wants = [True, True, True, False, True]                          # d3엔 신호가 아직 켜져 있어도 안 산다
+        r = backtest.simulate(Script(wants), bars, 0.0005, warmup=1, detail=True, stop_loss=10)
+        sides = [(f["i"], f["side"], f.get("stop_loss", False)) for f in r["detail"]["fills"]]
+        self.assertEqual(sides, [(0, "buy", False), (1, "sell", True), (4, "buy", False)])
+        self.assertAlmostEqual(r["detail"]["fills"][1]["price"], 100 * 1.0005 * 0.9)
+        plain = backtest.simulate(Script(wants), bars, 0.0005, warmup=1, detail=True)
+        self.assertEqual([(f["i"], f["side"]) for f in plain["detail"]["fills"]],  # 손절이 없으면 신호대로만 (d4에 판다)
+                         [(0, "buy"), (3, "sell"), (4, "buy")])
+
+    def test_higher_strategy_stop_fires_first(self):
+        class Trail(Script):
+            def plan(self, history, today_open):
+                return DayPlan(buy_at_open=next(self.wants), sell_stop=95)  # 전략의 이탈 가격이 손절선보다 위
+        bars = [candle("d0", 100, 100, 100, 100), candle("d1", 100, 100, 100, 100), candle("d2", 100, 100, 80, 85)]
+        r = backtest.simulate(Trail([True, True]), bars, 0.0, warmup=1, detail=True, stop_loss=10)
+        sell = r["detail"]["fills"][-1]
+        self.assertEqual((sell["price"], sell.get("stop_loss", False)), (95, False))
 
 
 class ComboRuleTest(unittest.TestCase):
@@ -625,6 +673,25 @@ class BotFlowTest(TempDbTest):
         self.assertEqual(bot.slots[0].strategy.name, "rsi")
         self.assertNotIn("buy", self.make_bot().settings["slots"][0])
         self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "sell": ["nope"], "weight": 10}])[1])
+
+    def test_stop_loss_sells_and_waits_for_a_fresh_signal(self):
+        self.db.set_state("settings", {"mode": "paper", "budget": 100_000, "slots": [
+            {"id": "a", "market": "KRW-BTC", "strategy": "buy_and_hold", "weight": 100, "stop_loss": 10}]})
+        bot = self.make_bot()
+        self.assertEqual(bot.slots[0].conf()["stop_loss"], 10)
+        self.btc(self.D1, 100)
+        self.go(bot, self.D1)                                          # 09시 매수 (100원)
+        self.assertIn("손절선 −10%", self.db.get_state("status")["slots"][0]["state_text"])
+        self.btc(self.D1, 89)                                          # 손절선 약 90원 아래로 (산 날이어도 지킨다)
+        self.go(bot, self.D1)
+        self.assertEqual(self.trades(), [("buy", "KRW-BTC"), ("sell", "KRW-BTC")])
+        self.assertIn("손절선", self.db.recent_trades()[0]["reason"])
+        self.btc(self.D2, 95)
+        self.go(bot, self.D2, steps=2)                                  # 바이앤홀드는 매수 신호가 안 꺼져서 다시 안 산다
+        self.assertEqual(len(self.trades()), 2)
+        self.assertIn("손절 뒤 쉬는 중", self.db.get_state("status")["slots"][0]["state_text"])
+        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 10, "stop_loss": 0.3}])[1])
+        self.assertEqual(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 10, "stop_loss": "7"}])[0][0]["stop_loss"], 7)
 
     def test_sold_row_is_not_bought_back_at_the_same_open(self):
         self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100))
@@ -951,6 +1018,14 @@ class WebTest(TempDbTest):
         self.assertEqual(sum(not r.get("combo") for r in sim["results"]), len(STRATEGIES))
         simple = web.build_simulation(self.path, cfg, "KRW-ETH", "1d", 90, "rsi", normalize_rule({"strategy": "rsi"}))
         self.assertEqual((simple["detail"]["name"], len(simple["results"])), ("rsi", len(STRATEGIES)))
+
+        # 손절선: 모든 전략에 같은 손절선. 비교선 '그냥 들고 있었다면'은 손절 없이
+        self.assertEqual((web._query_stop({"stop": ["10"]}), web._query_stop({"stop": ["0.2"]}), web._query_stop({})), (10, 0, 0))
+        cut = web.build_simulation(self.path, cfg, "KRW-ETH", "1d", 90, "rsi", None, 10)
+        plain_hold = next(r for r in simple["results"] if r["name"] == "buy_and_hold")["total_return"]
+        self.assertEqual(cut["stop_loss"], 10)
+        self.assertAlmostEqual(cut["hold"]["total_return"], plain_hold)
+        self.assertEqual(simple["hold"]["total_return"], plain_hold)
 
 
 class AuthTest(TempDbTest):
