@@ -356,6 +356,7 @@ class Bot:
         """봉 시작 매매. 매도 신호가 난 줄을 먼저 팔고, 그다음 매수 신호가 난 줄을 산다 (보유 유지는 그대로).
         상태의 *_day 값에는 봉 키가 들어간다 (일봉이면 날짜)."""
         todo = [s for s in slots if self._sstate(s).get("open_done_day") != bars[s.id]]
+        sold = set()
         for s in todo:
             if self._holding(s, prices[s.market]) and s.plan.sell_at_open:
                 if s.strategy.exit_next_open:
@@ -363,8 +364,11 @@ class Bot:
                 else:
                     reason = f"매도 신호 · {s.plan.note}"
                 self._sell(s, prices[s.market], reason)
+                self._set_sstate(s.id, open_done_day=bars[s.id])
+                sold.add(s.id)
         for s in todo:
-            if not self._holding(s, prices[s.market]) and s.plan.buy_at_open:
+            # 방금 판 줄은 같은 봉 시작에 다시 사지 않는다 (살 때·팔 때 조합에서 사자·팔자가 같이 켜진 경우. 시뮬레이션과 같은 규칙)
+            if s.id not in sold and not self._holding(s, prices[s.market]) and s.plan.buy_at_open:
                 self._buy(s, prices[s.market], bars[s.id], f"매수 신호 · {s.plan.note}")
             self._set_sstate(s.id, open_done_day=bars[s.id])  # 재시작해도 봉 시작 매매를 두 번 하지 않게
 

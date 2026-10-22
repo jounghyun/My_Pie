@@ -293,12 +293,16 @@ class StockBot:
     def _open_actions(self, slots: list[StockSlot], today: str) -> None:
         """장 시작 매매. 매도 신호가 난 계좌를 먼저 팔고, 그다음 매수 신호가 난 계좌를 산다."""
         todo = [s for s in slots if self._sstate(s).get("open_done_day") != today]
+        sold = set()
         for s in todo:
             if self._holding(s) and s.plan.sell_at_open:
                 reason = "산 다음 장 시작에 매도" if s.strategy.exit_next_open else f"매도 신호 · {s.plan.note}"
                 self._sell(s, reason)
+                self._set_sstate(s.id, open_done_day=today)
+                sold.add(s.id)
         for s in todo:
-            if not self._holding(s) and s.plan.buy_at_open:
+            # 방금 판 계좌는 같은 장 시작에 다시 사지 않는다 (살 때·팔 때 조합에서 사자·팔자가 같이 켜진 경우. 시뮬레이션과 같은 규칙)
+            if s.id not in sold and not self._holding(s) and s.plan.buy_at_open:
                 self._buy(s, today, f"매수 신호 · {s.plan.note}")
             self._set_sstate(s.id, open_done_day=today)  # 재시작해도 장 시작 매매를 두 번 하지 않게
 

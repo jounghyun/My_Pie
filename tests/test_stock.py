@@ -13,6 +13,7 @@ from mypie.db import Database
 from mypie.stockbot import StockBot
 from mypie.stockbroker import LiveStockExecutor, PaperStockExecutor
 from mypie.strategies import STOCK_STRATEGIES
+from mypie.strategies.base import DayPlan
 from mypie.timeutil import KST
 from mypie.vault import VaultBook, VaultError
 
@@ -259,6 +260,20 @@ class StockBotTest(TempDb):
         self.request(6, action="strategy", slot=sid, strategy="ma_cross")  # 하나로 되돌리면 조합 칸은 지운다
         bot.step(at(DAY2, "09:05"))
         self.assertNotIn("buy", self.slot(bot))
+
+    def test_sold_account_is_not_bought_back_at_the_same_open(self):
+        self.toss.set(self.SYMBOL, DAY1, 100_000)
+        bot = self.make_bot()
+        self.request(1, action="add", symbol=self.SYMBOL, name="SK하이닉스", strategy="buy_and_hold", amount=350_000)
+        bot.step(at(DAY1, "08:30"))                                      # 장 전: 계좌만 만든다
+        bot.step(at(DAY1, "09:01"))
+        self.assertEqual(self.trades(), [("buy", self.SYMBOL, 3)])
+        self.toss.set(self.SYMBOL, DAY2, 100_000)
+        both = lambda strategy, history, today_open: DayPlan(buy_at_open=True, sell_at_open=True, note="둘 다")
+        with mock.patch.object(STOCK_STRATEGIES["buy_and_hold"], "plan", both):  # 조합에서 사자·팔자가 같이 켜진 날
+            bot.step(at(DAY2, "09:01"))
+            bot.step(at(DAY2, "09:02"))
+        self.assertEqual([t[0] for t in self.trades()], ["buy", "sell"])  # 팔기만 하고 바로 다시 사지 않는다
 
     def test_sell_proceeds_stay_in_the_slot(self):
         prev = [candle("2026-10-21", 90_000, 110_000, 90_000, 100_000)]  # 목표가 = 시가 + 20,000 × 0.5

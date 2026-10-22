@@ -26,7 +26,7 @@ from mypie.broker import Book, LiveExecutor, PaperExecutor, sync_full
 from mypie.config import DEFAULTS
 from mypie.db import Database
 from mypie.strategies import STRATEGIES, create_strategy, strategy_params
-from mypie.strategies.base import render_text
+from mypie.strategies.base import DayPlan, render_text
 from mypie.strategies.combo import check_rule, make_rule, normalize_rule, rule_fields
 from mypie.timeutil import KST, trading_day
 from mypie.upbit import OrderRejected, UpbitError, make_token
@@ -625,6 +625,17 @@ class BotFlowTest(TempDbTest):
         self.assertEqual(bot.slots[0].strategy.name, "rsi")
         self.assertNotIn("buy", self.make_bot().settings["slots"][0])
         self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "sell": ["nope"], "weight": 10}])[1])
+
+    def test_sold_row_is_not_bought_back_at_the_same_open(self):
+        self.portfolio(("a", "KRW-BTC", "buy_and_hold", 100))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        self.go(bot, self.D1)                                          # 09시 매수
+        both = lambda strategy, history, today_open: DayPlan(buy_at_open=True, sell_at_open=True, note="둘 다")
+        self.btc(self.D2, 100)
+        with mock.patch.object(STRATEGIES["buy_and_hold"], "plan", both):  # 조합에서 사자·팔자가 같이 켜진 봉
+            self.go(bot, self.D2, steps=2)
+        self.assertEqual(self.trades(), [("buy", "KRW-BTC"), ("sell", "KRW-BTC")])  # 팔기만 하고 바로 다시 사지 않는다
 
     def test_status_shows_buy_and_hold_comparison(self):
         self.portfolio(("a", "KRW-BTC", "rsi", 100))
