@@ -33,6 +33,7 @@ from .config import load_config
 from .db import Database
 from .stockbroker import LiveStockExecutor, PaperStockExecutor
 from .strategies import STOCK_STRATEGIES, DayPlan, create_strategy, strategy_params
+from .strategies.combo import check_rule, make_rule, normalize_rule, rule_label
 from .timeutil import KST, now_kst, ts
 from .vault import VaultBook, VaultError
 
@@ -82,8 +83,9 @@ class StockSlot:
         self.id = sid
         self.symbol = entry["symbol"]
         self.name = entry.get("name") or entry["symbol"]
-        self.strategy = create_strategy(entry["strategy"], {**strategy_params(cfg, entry["strategy"]), "_bar": "일"},
-                                        STOCK_STRATEGIES)
+        self.rule = normalize_rule(entry)  # 살 때·팔 때 전략 (예전 계좌는 둘 다 같은 전략 하나)
+        self.strategy = make_rule(self.rule, lambda n: create_strategy(n, {**strategy_params(cfg, n), "_bar": "일"},
+                                                                       STOCK_STRATEGIES))
         self.plan: DayPlan | None = None
         self.plan_day: str | None = None
 
@@ -158,7 +160,7 @@ class StockBot:
         for sid, entry in self.book.data["slots"].items():
             slot = StockSlot(self.cfg, sid, entry)
             prev = old.get(sid)
-            if prev and prev.symbol == slot.symbol and prev.strategy.name == slot.strategy.name:
+            if prev and prev.symbol == slot.symbol and prev.rule == slot.rule:
                 slot.plan, slot.plan_day = prev.plan, prev.plan_day
             slots.append(slot)
         self.slots = slots
@@ -424,6 +426,10 @@ class StockBot:
             self.db.set_state("request_results", results)
             self.event("info" if ok else "warning", message)
 
+    @staticmethod
+    def _rule_text(rule: dict) -> str:
+        return rule_label(rule, lambda n: STOCK_STRATEGIES[n].label)
+
     def _apply_request(self, r: dict, today: str) -> str:
         action = r["action"]
         if action == "mode":
@@ -449,11 +455,12 @@ class StockBot:
             self.book.deposit(amount)
             return f"모의 금고에 {'입금' if amount > 0 else '출금'} {abs(amount):,.0f}원"
         if action == "add":
-            symbol, strategy = str(r["symbol"]), str(r["strategy"])
+            symbol = str(r["symbol"])
             if not SYMBOL_PATTERN.match(symbol):
                 raise VaultError(f"잘못된 종목 코드예요: {symbol}")
-            if strategy not in STOCK_STRATEGIES:
-                raise VaultError(f"알 수 없는 전략이에요: {strategy}")
+            rule, problem = check_rule(r, STOCK_STRATEGIES)  # 살 때·팔 때 전략
+            if problem:
+                raise VaultError(problem)
             if len(self.book.data["slots"]) >= MAX_SLOTS:
                 raise VaultError(f"종목 계좌는 {MAX_SLOTS}개까지 만들 수 있어요")
             name = str(r.get("name") or symbol)[:40]
@@ -461,12 +468,12 @@ class StockBot:
             if amount > self.book.vault + 0.5:
                 raise VaultError(f"금고에 {self.book.vault:,.0f}원밖에 없어요")
             sid = "k" + uuid.uuid4().hex[:6]
-            self.book.add_slot(sid, symbol, name, strategy)
+            self.book.add_slot(sid, symbol, name, rule)
             if amount > 0:
                 self.book.transfer(sid, amount)
             self._load_slots()
             self.last_sync = 0.0  # 실거래면 원래 있던 이 종목 주식을 바로 가져오게
-            return f"{name} 종목 계좌를 만들었어요 · {STOCK_STRATEGIES[strategy].label}" + (f" · 금고에서 {amount:,.0f}원" if amount > 0 else "")
+            return f"{name} 종목 계좌를 만들었어요 · {self._rule_text(rule)}" + (f" · 금고에서 {amount:,.0f}원" if amount > 0 else "")
         sid = str(r["slot"])
         if not self.book.has(sid):
             raise VaultError("그 종목 계좌가 없어요")
@@ -477,13 +484,13 @@ class StockBot:
             self._load_slots()
             return f"{name} 종목 계좌를 지웠어요" + (f" · 잔액 {moved:,.0f}원은 금고로" if moved else "")
         if action == "strategy":
-            strategy = str(r["strategy"])
-            if strategy not in STOCK_STRATEGIES:
-                raise VaultError(f"알 수 없는 전략이에요: {strategy}")
-            self.book.set_strategy(sid, strategy)
+            rule, problem = check_rule(r, STOCK_STRATEGIES)
+            if problem:
+                raise VaultError(problem)
+            self.book.set_rule(sid, rule)
             self._drop_sstate(sid)  # 새 전략이 처음부터 판단한다 (장중이면 지금, 아니면 다음 장 시작 때)
             self._load_slots()
-            return f"{name} 전략을 {STOCK_STRATEGIES[strategy].label}(으)로 바꿨어요 · 주식은 그대로 두고 새 전략이 판단해요"
+            return f"{name} 전략을 바꿨어요 · {self._rule_text(rule)} · 주식은 그대로 두고 새 전략이 판단해요"
         if action == "transfer":
             s = self.book.slot(sid)
             if r.get("all"):
@@ -609,6 +616,7 @@ class StockBot:
                     "strategy": {"name": slot.strategy.name, "label": slot.strategy.label,
                                  "description": slot.strategy.description, "guide": slot.strategy.guide,
                                  "exit_next_open": slot.strategy.exit_next_open},
+                    "rule": slot.rule,  # 살 때·팔 때 전략
                     "plan": asdict(slot.plan) if slot.plan and slot.plan_day == today else None,
                     "state_text": self._state_text(slot, sess, today), "holding": s["qty"] > 0,
                     "cash": s["cash"], "qty": s["qty"], "avg_price": s["avg_price"], "cost": s["cost"],

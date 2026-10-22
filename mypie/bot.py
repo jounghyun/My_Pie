@@ -32,6 +32,7 @@ from .db import Database
 from .history import sync_candles
 from .keys import days_left, load_keys
 from .strategies import STRATEGIES, DayPlan, create_strategy, strategy_params
+from .strategies.combo import check_rule, make_rule, normalize_rule, rule_fields
 from .timeframes import bar_key, next_bar
 from .timeutil import KST, now_kst, trading_day, ts
 
@@ -55,8 +56,9 @@ class Slot:
         self.market = conf["market"]
         self.tf = conf.get("tf") or timeframes.DEFAULT
         self.weight = float(conf["weight"])
-        params = {**strategy_params(cfg, conf["strategy"]), "_bar": timeframes.TIMEFRAMES[self.tf]["bar"]}
-        self.strategy = create_strategy(conf["strategy"], params)
+        self.rule = normalize_rule(conf)  # 살 때·팔 때 전략 (예전 설정은 둘 다 같은 전략 하나)
+        bar = timeframes.TIMEFRAMES[self.tf]["bar"]
+        self.strategy = make_rule(self.rule, lambda n: create_strategy(n, {**strategy_params(cfg, n), "_bar": bar}))
         self.plan: DayPlan | None = None
         self.plan_day: str | None = None  # 계획을 세운 봉의 키 (일봉이면 날짜)
 
@@ -69,7 +71,7 @@ class Slot:
         return ranking_key(self.market, self.tf)
 
     def conf(self) -> dict:
-        return {"id": self.id, "market": self.market, "strategy": self.strategy.name, "tf": self.tf,
+        return {"id": self.id, "market": self.market, **rule_fields(self.rule), "tf": self.tf,
                 "weight": self.weight}
 
 
@@ -90,7 +92,7 @@ def validate_slots(raw) -> tuple[list[dict] | None, str | None]:
     for item in raw:
         if not isinstance(item, dict):
             return None, "잘못된 줄이 있어요"
-        market, strategy = str(item.get("market", "")), str(item.get("strategy", ""))
+        market = str(item.get("market", ""))
         tf = str(item.get("tf") or timeframes.DEFAULT)
         try:
             weight = float(item.get("weight"))
@@ -100,14 +102,15 @@ def validate_slots(raw) -> tuple[list[dict] | None, str | None]:
             return None, f"잘못된 종목: {market}"
         if market in seen:
             return None, f"{market}이(가) 두 번 들어 있어요. 종목마다 한 줄씩만 넣어 주세요"
-        if strategy not in STRATEGIES:
-            return None, f"알 수 없는 전략: {strategy}"
+        rule, problem = check_rule(item, STRATEGIES)  # 살 때·팔 때 전략
+        if problem:
+            return None, f"{market}: {problem}"
         if tf not in timeframes.TIMEFRAMES:
             return None, f"알 수 없는 판단 주기: {tf}"
         if not 0 <= weight <= 100:  # 0%는 '지켜보기만 하는 줄' (나중에 비중만 올리면 바로 매매)
             return None, f"{market}의 비중은 0~100% 사이로 넣어 주세요"
         seen.add(market)
-        slots.append({"id": str(item.get("id") or ""), "market": market, "strategy": strategy, "tf": tf,
+        slots.append({"id": str(item.get("id") or ""), "market": market, **rule_fields(rule), "tf": tf,
                       "weight": weight})
     total = sum(s["weight"] for s in slots)
     if total > 100.0001:
@@ -531,7 +534,7 @@ class Bot:
         for s in self.slots:
             c = new_by_id.get(s.id)
             changed = (account_changed or c is None or c["market"] != s.market
-                       or c["strategy"] != s.strategy.name or c["tf"] != s.tf)
+                       or normalize_rule(c) != s.rule or c["tf"] != s.tf)
             if changed and self._holding(s, prices[s.market]):
                 self._sell(s, prices[s.market], "포트폴리오 변경")
 
@@ -546,7 +549,7 @@ class Bot:
             slot = Slot(self.cfg, c)
             old = old_by_id.get(c["id"])
             if (old and not account_changed and old.market == slot.market
-                    and old.strategy.name == slot.strategy.name and old.tf == slot.tf):
+                    and old.rule == slot.rule and old.tf == slot.tf):
                 slot.plan, slot.plan_day = old.plan, old.plan_day  # 비중만 바뀐 줄은 오늘 계획 그대로
             else:
                 self._drop_sstate(c["id"])
@@ -692,6 +695,7 @@ class Bot:
                 "next_at": ts(next_bar(s.tf)), "rank_key": s.rank_key,
                 "strategy": {"name": s.strategy.name, "label": s.strategy.label, "description": s.strategy.description,
                              "guide": s.strategy.guide, "exit_next_open": s.strategy.exit_next_open},
+                "rule": s.rule,  # 살 때·팔 때 전략
                 "plan": asdict(s.plan) if s.plan else None,
                 "state_text": self._state_text(s, price),
                 "holding": holding,

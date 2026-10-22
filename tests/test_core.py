@@ -27,6 +27,7 @@ from mypie.config import DEFAULTS
 from mypie.db import Database
 from mypie.strategies import STRATEGIES, create_strategy, strategy_params
 from mypie.strategies.base import render_text
+from mypie.strategies.combo import check_rule, make_rule, normalize_rule, rule_fields
 from mypie.timeutil import KST, trading_day
 from mypie.upbit import OrderRejected, UpbitError, make_token
 
@@ -303,6 +304,51 @@ class BacktestTest(unittest.TestCase):
             backtest.rank_period(candles[:100], 90, 0.0005)
 
 
+class ComboRuleTest(unittest.TestCase):
+    """살 때·팔 때 전략 조합 (strategies/combo.py)."""
+
+    def test_rules_are_tidied_like_the_web_page(self):
+        self.assertEqual(normalize_rule({"strategy": "rsi"}),                     # 예전 설정: 살 때·팔 때 모두 그 전략
+                         {"strategy": "rsi", "buy": ["rsi"], "buy_op": "and", "sell": ["rsi"], "sell_op": "and"})
+        rule = normalize_rule({"strategy": "x", "buy": ["rsi", "rsi"], "buy_op": "or", "sell": ["macd", "rsi", "ma_cross"],
+                               "sell_op": "or"})
+        self.assertEqual(rule, {"strategy": "rsi", "buy": ["rsi"], "buy_op": "and",   # 같은 전략 두 번은 하나로
+                                "sell": ["macd", "rsi"], "sell_op": "or"})            # 한쪽에 둘까지
+        self.assertEqual(rule_fields(normalize_rule({"strategy": "rsi", "sell": ["rsi"]})), {"strategy": "rsi"})
+        self.assertEqual(rule_fields(rule), rule)
+        self.assertIsNone(check_rule(rule, STRATEGIES)[1])
+        self.assertIsNotNone(check_rule({"strategy": "rsi", "sell": ["nope"]}, STRATEGIES)[1])
+
+    def test_simple_rule_is_the_strategy_itself(self):
+        made = make_rule(normalize_rule({"strategy": "rsi"}), lambda n: STRATEGIES[n](None))
+        self.assertIs(type(made), STRATEGIES["rsi"])
+
+    def test_combo_trades_like_its_parts(self):
+        def run(phase, strategy):
+            prices = [100 + 10 * math.sin((i + phase) / 6) for i in range(260)]
+            candles = [candle(f"d{i:03d}", p, p * 1.01, p * 0.99, p) for i, p in enumerate(prices)]
+            return backtest.simulate(strategy, candles, 0.0005, 150, detail=True)
+
+        # 팔 때 '골든크로스 또는 그냥 들고 있기'는 골든크로스만 보는 것과 같다 (그냥 들고 있기는 팔자고 하지 않음)
+        rule = normalize_rule({"strategy": "ma_cross", "sell": ["ma_cross", "buy_and_hold"], "sell_op": "or"})
+        combo = make_rule(rule, lambda n: STRATEGIES[n](None))
+        self.assertEqual(combo.name, "combo")
+        self.assertIn("팔 때", combo.label)
+        raw, mixed = run(20, STRATEGIES["ma_cross"](None)), run(20, combo)
+        self.assertEqual(mixed["detail"]["fills"], raw["detail"]["fills"])
+        self.assertAlmostEqual(mixed["total_return"], raw["total_return"])
+        # 시작할 때 이미 '보유' 상태면 조합은 새 매수 신호(안 삼 → 삼)를 기다린다
+        raw, mixed = run(8, STRATEGIES["ma_cross"](None)), run(8, make_rule(rule, lambda n: STRATEGIES[n](None)))
+        self.assertEqual(raw["detail"]["fills"][0]["i"], 0)
+        self.assertGreater(mixed["detail"]["fills"][0]["i"], 0)
+
+    def test_strategy_short_of_data_does_not_force_a_sell(self):
+        rule = normalize_rule({"strategy": "rsi", "sell": ["ma_cross", "macd"], "sell_op": "or"})
+        plan = make_rule(rule, lambda n: STRATEGIES[n](None)).plan(flat_history(10), 100.0)  # 둘 다 봉이 모자람
+        self.assertFalse(plan.sell_at_open)
+        self.assertIn("데이터 부족", plan.note)
+
+
 class ValidateSlotsTest(unittest.TestCase):
     def test_rules(self):
         ok, problem = validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "weight": 60},
@@ -560,6 +606,25 @@ class BotFlowTest(TempDbTest):
         self.assertGreater(bot.book.slot("a")["coin"], btc_coin)        # 비중이 늘어난 몫만큼 추가 매수
         self.assertEqual([s.id for s in bot.slots], ["a"])
         self.assertEqual(self.make_bot().settings["slots"][0]["weight"], 80.0)  # 재시작해도 유지
+
+    def test_buy_and_sell_rule_is_saved_and_reported(self):
+        self.portfolio(("a", "KRW-BTC", "rsi", 100))
+        bot = self.make_bot()
+        self.btc(self.D1, 100)
+        rule = {"strategy": "rsi", "buy": ["rsi", "macd"], "buy_op": "or", "sell": ["ma_cross"], "sell_op": "and"}
+        self.db.set_state("control_request", {"mode": "paper", "slots": [
+            {"id": "a", "market": "KRW-BTC", **rule, "weight": 100}]})
+        self.go(bot, self.D1)
+        self.assertEqual((bot.slots[0].rule, bot.slots[0].strategy.name), (rule, "combo"))
+        saved = self.make_bot().settings["slots"][0]                    # 재시작해도 유지
+        self.assertEqual({k: saved[k] for k in rule}, rule)
+        self.assertEqual(self.db.get_state("status")["slots"][0]["rule"], rule)
+        self.db.set_state("control_request", {"mode": "paper", "slots": [   # 전략 하나로 되돌리면 예전 모양 그대로
+            {"id": "a", "market": "KRW-BTC", "strategy": "rsi", "weight": 100}]})
+        self.go(bot, self.D1)
+        self.assertEqual(bot.slots[0].strategy.name, "rsi")
+        self.assertNotIn("buy", self.make_bot().settings["slots"][0])
+        self.assertIsNotNone(validate_slots([{"market": "KRW-BTC", "strategy": "rsi", "sell": ["nope"], "weight": 10}])[1])
 
     def test_status_shows_buy_and_hold_comparison(self):
         self.portfolio(("a", "KRW-BTC", "rsi", 100))
@@ -853,6 +918,21 @@ class WebTest(TempDbTest):
         self.assertEqual(web.build_simulation(self.path, cfg, "KRW-ETH", "1d", 1095, "")["days"], 180)  # 되는 기간 중 가장 긴 것
         self.assertTrue(web.build_simulation(self.path, cfg, "KRW-SOL", "1d", 90, "")["need_data"])
         self.assertFalse(web.build_simulation(self.path, cfg, "SOL", "1d", 90, "")["ready"])
+
+        # 살 때·팔 때 조합: 맨 위에 '조합' 줄, 순위는 그 전략들 사이에 넣었을 때
+        query = {"strategy": ["rsi"], "buy": ["rsi,macd"], "buy_op": ["or"], "sell": ["ma_cross"]}
+        rule = web._query_rule(query, STRATEGIES)
+        self.assertEqual((rule["buy"], rule["buy_op"], rule["sell"]), (["rsi", "macd"], "or", ["ma_cross"]))
+        self.assertIsNone(web._query_rule({"strategy": ["rsi"]}, STRATEGIES))
+        self.assertIsNone(web._query_rule({**query, "sell": ["nope"]}, STRATEGIES))
+        sim = web.build_simulation(self.path, cfg, "KRW-ETH", "1d", 90, "rsi", rule)
+        top = sim["results"][0]
+        self.assertTrue(top["combo"])
+        self.assertEqual((sim["detail"]["name"], len(sim["results"])), ("combo", len(STRATEGIES) + 1))
+        self.assertTrue(1 <= top["rank"] <= len(STRATEGIES) + 1)
+        self.assertEqual(sum(not r.get("combo") for r in sim["results"]), len(STRATEGIES))
+        simple = web.build_simulation(self.path, cfg, "KRW-ETH", "1d", 90, "rsi", normalize_rule({"strategy": "rsi"}))
+        self.assertEqual((simple["detail"]["name"], len(simple["results"])), ("rsi", len(STRATEGIES)))
 
 
 class AuthTest(TempDbTest):

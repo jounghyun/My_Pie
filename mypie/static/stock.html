@@ -31,14 +31,15 @@
   .suggest button:hover, .suggest button:focus { background: var(--soft); }
   .suggest small { color: var(--muted); }
   .picked { font-weight: 700; }
-  .addgrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.4fr) minmax(0, .8fr); gap: 10px; }
+  .addgrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr); gap: 10px; }
+  .addgrid .addrule { grid-column: 1 / -1; display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+  .addgrid .addrule select, .panel .rule select { color: var(--text); }
   @media (max-width: 760px) { .addgrid { grid-template-columns: 1fr; } }
   .addgrid label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
   .addgrid select, .addgrid input[type=number] { width: 100%; min-width: 0; color: var(--text); }
   .setup { display: grid; gap: 6px; }
   .tagline { font-size: 11px; font-weight: 700; color: var(--brand); background: var(--brand-soft); border-radius: 6px; padding: 0 6px; margin-left: 6px; }
-  .simbar { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.6fr) minmax(0, .7fr); gap: 8px; }
-  @media (max-width: 640px) { .simbar { grid-template-columns: 1fr 1fr; } .simbar .wide { grid-column: 1 / -1; } }
+  .simbar { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .7fr); gap: 8px; }
   .simbar label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
   .simbar select { width: 100%; min-width: 0; color: var(--text); }
 </style>
@@ -127,8 +128,8 @@
       <label>종목 (이름이나 코드)
         <div class="search"><input id="addSearch" placeholder="예: 삼성전자, 005930" autocomplete="off"><div class="suggest" id="addSuggest" hidden></div></div>
       </label>
-      <label>전략 <span id="addRankNote"></span><select id="addStrategy"></select></label>
       <label>금고에서 넣을 돈 (원)<input type="number" id="addAmount" min="0" step="10000" placeholder="0" inputmode="numeric"></label>
+      <div class="addrule">전략 <span id="addRankNote"></span><div id="addRule"></div></div>
     </div>
     <p class="guide-now" id="addGuide" hidden></p>
     <div class="actions">
@@ -158,8 +159,8 @@
       <label>종목
         <div class="search"><input id="simSearch" placeholder="이름이나 코드" autocomplete="off"><div class="suggest" id="simSuggest" hidden></div></div>
       </label>
-      <label class="wide">전략 (이 기간 순위)<select id="simStrategy"></select></label>
       <label>과거 기간<select id="simDays"></select></label>
+      <div class="simrule">전략 (이 기간 순위)<div id="simRule"></div></div>
     </div>
     <p class="simline" id="simLine">종목을 고르면 계산해요</p>
     <div class="simtiles" id="simTiles"></div>
@@ -216,6 +217,7 @@
 </div>
 <div id="toasts" class="toasts"></div>
 
+<script src="/rules.js"></script>
 <script>
 // ---------- 도우미 ----------
 const $ = (id) => document.getElementById(id);
@@ -274,6 +276,7 @@ const SIM_BASE = 1e6;
 const MEDALS = ['🥇', '🥈', '🥉'];
 const COLORS = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c6)', 'var(--c7)', 'var(--c8)', 'var(--c9)', 'var(--c10)', 'var(--c11)'];
 const strat = (name) => (S.data.strategies || []).find(x => x.name === name) || { name, label: name };
+function slotRule(x) { return normalizeRule(x.rule || { strategy: x.strategy.name }); }  // 종목 계좌의 살 때·팔 때 규칙
 const slots = () => (S.data && S.data.status && S.data.status.slots) || [];
 const slotOf = (sym) => slots().find(x => x.symbol === sym);
 
@@ -317,7 +320,8 @@ function renderAll() {
   renderResults(d.results);
   if (!S.guidesDone) renderGuides();
   if (!S.sel && slots().length) selectSymbol(slots()[0].symbol);
-  if (!S.simSel && slots().length) simPick(slots()[0].symbol, slots()[0].name, slots()[0].strategy.name);
+  if (!S.simSel && slots().length) simPick(slots()[0].symbol, slots()[0].name, slotRule(slots()[0]));
+  if (!$('addBox').hidden && addSig() !== S.addSig) fillAddStrategies();  // 순위 계산이 끝나면 고르는 칸도 새로
   simTick();
   document.title = s.account ? `${won(s.account.equity)} · My_Pie 주식` : 'My_Pie 주식';
 }
@@ -383,7 +387,7 @@ function planLine(x) {
 }
 function renderSlots(s) {
   const box = $('slotCards');
-  const focused = document.activeElement && box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+  const focused = document.activeElement && box.contains(document.activeElement) && ['INPUT', 'SELECT'].includes(document.activeElement.tagName);
   if (focused) return;  // 입력 중이면 다시 그리지 않는다 (글자가 날아가지 않게)
   box.innerHTML = '';
   s.slots.forEach((x, i) => {
@@ -418,7 +422,7 @@ function renderSlots(s) {
     box.append(card);
   });
   const add = el('div', { class: 'card add-card', text: '＋ 종목 계좌 만들기' });
-  add.onclick = () => { $('addBox').hidden = false; $('addBox').scrollIntoView({ block: 'start' }); $('addSearch').focus(); };
+  add.onclick = () => { $('addBox').hidden = false; fillAddStrategies(); $('addBox').scrollIntoView({ block: 'start' }); $('addSearch').focus(); };
   box.append(add);
 }
 function slotPanel(x, kind) {
@@ -439,13 +443,13 @@ function slotPanel(x, kind) {
       ? `금고에 ${won(max)} 있어요. 넣어도 바로 사지 않고, 매수 신호가 날 때 이 잔액으로 사요.`
       : `이 계좌 잔액 ${won(max)}을(를) 금고로 옮겨요. 주식은 그대로예요.` }));
   } else if (kind === 'strategy') {
-    const sel = el('select', { 'aria-label': '새 전략' });
-    for (const r of rankedFor(x.symbol)) sel.append(el('option', { value: r.name, text: optionText(r) }));
-    sel.value = x.strategy.name;
+    if (!S.open.rule) S.open.rule = slotRule(x);  // 고치는 중인 규칙은 5초마다 다시 그려도 남아 있게
+    const rule = S.open.rule;
+    const rb = ruleBuilder(rule, () => rankedFor(x.symbol).map(r => ({ value: r.name, text: optionText(r) })), () => {});
     const go = el('button', { type: 'button', class: 'primary', text: '바꾸기' });
-    go.onclick = () => send({ action: 'strategy', slot: x.id, strategy: sel.value }, pin, close);
-    row.append(sel, pin, go);
-    p.append(row, el('span', { class: 'hint', text: '들고 있는 주식은 팔지 않고, 새 전략이 바로(장중) 또는 다음 장 시작에 판단해요.' }));
+    go.onclick = () => send({ action: 'strategy', slot: x.id, ...ruleFields(rule) }, pin, close);
+    row.append(pin, go);
+    p.append(rb, row, el('span', { class: 'hint', text: '들고 있는 주식은 팔지 않고, 새 전략이 바로(장중) 또는 다음 장 시작에 판단해요.' }));
   } else {
     const go = el('button', { type: 'button', class: 'primary', text: '지우기' });
     go.disabled = x.qty > 0;
@@ -500,7 +504,7 @@ searchBox($('addSearch'), $('addSuggest'), (s) => {
   requestRanking(s.symbol);
   fillAddStrategies();
 });
-searchBox($('simSearch'), $('simSuggest'), (s) => { const x = slotOf(s.symbol); simPick(s.symbol, s.name, x ? x.strategy.name : ''); });
+searchBox($('simSearch'), $('simSuggest'), (s) => { const x = slotOf(s.symbol); simPick(s.symbol, s.name, x ? slotRule(x) : null); });
 $('addClose').onclick = () => { $('addBox').hidden = true; };
 
 function rankedFor(symbol) {
@@ -512,27 +516,35 @@ function optionText(r) {
   const tag = strat(r.name).stock_only ? ' · 주식 전용' : '';
   return r.rank ? `${r.rank <= 3 ? MEDALS[r.rank - 1] : r.rank + '위'} ${r.label} (${pct(r.total_return * 100, 0)})${tag}` : r.label + tag;
 }
-function fillAddStrategies() {
-  const sel = $('addStrategy'), keep = sel.value;
-  sel.innerHTML = '';
+function addSig() {
   const sym = S.add && S.add.symbol, rk = sym && S.data.rankings[sym];
-  for (const r of sym ? rankedFor(sym) : S.data.strategies) sel.append(el('option', { value: r.name, text: optionText(r) }));
-  if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+  return `${sym || ''}|${rk ? rk.computed_at || rk.error || '' : ''}`;
+}
+function fillAddStrategies() {  // 살 때·팔 때 전략. 손대기 전에는 이 종목 1위 전략 하나
+  const sym = S.add && S.add.symbol, rk = sym && S.data.rankings[sym];
+  const list = sym ? rankedFor(sym) : S.data.strategies;
+  if (!S.addRule || !S.addTouched) S.addRule = normalizeRule({ strategy: list[0].name });
+  S.addSig = addSig();
+  $('addRule').innerHTML = '';
+  $('addRule').append(ruleBuilder(S.addRule, () => list.map(r => ({ value: r.name, text: optionText(r) })),
+                                  () => { S.addTouched = true; showAddGuide(); }));
   $('addRankNote').textContent = !sym ? '' : rk && rk.results ? `(최근 3년 순위)` : rk && rk.error ? `(${rk.error})` : '(순위 계산 중…)';
   showAddGuide();
 }
-function showAddGuide() {
-  const g = strat($('addStrategy').value);
-  $('addGuide').hidden = !g.guide;
-  $('addGuide').innerHTML = '';
-  if (g.guide) $('addGuide').append(el('b', { text: `💡 ${g.label} · ` }), fmtGuide(g.guide));
+function showAddGuide() {  // 고른 전략마다 한 줄씩
+  const box = $('addGuide'), r = S.addRule;
+  box.innerHTML = '';
+  for (const name of r ? [...new Set([...r.buy, ...r.sell])] : []) {
+    const g = strat(name);
+    if (g.guide) box.append(el('div', {}, el('b', { text: `💡 ${g.label} · ` }), fmtGuide(g.guide)));
+  }
+  box.hidden = !box.childNodes.length;
 }
-$('addStrategy').onchange = showAddGuide;
 $('addGo').onclick = () => {
   if (!S.add) { toast('종목을 먼저 골라 주세요', 'bad'); $('addSearch').focus(); return; }
-  send({ action: 'add', symbol: S.add.symbol, name: S.add.name, strategy: $('addStrategy').value, amount: Number($('addAmount').value) || 0 },
+  send({ action: 'add', symbol: S.add.symbol, name: S.add.name, ...ruleFields(S.addRule), amount: Number($('addAmount').value) || 0 },
        $('addPin'), () => { $('addBox').hidden = true; $('addSearch').value = ''; $('addAmount').value = ''; $('addPin').value = ''; S.add = null;
-                            $('addPicked').textContent = '종목을 먼저 골라 주세요'; });
+                            S.addRule = null; S.addTouched = false; $('addPicked').textContent = '종목을 먼저 골라 주세요'; });
 };
 async function requestRanking(symbol) {
   if (!symbol || Date.now() - (S.requested[symbol] || 0) < 60000) return;
@@ -638,7 +650,7 @@ function selectSymbol(sym) {
   S.sel = sym;
   refreshCandles();
   const x = slotOf(sym);
-  if (x && (!S.simSel || S.simSel.symbol !== sym)) simPick(sym, x.name, x.strategy.name);
+  if (x && (!S.simSel || S.simSel.symbol !== sym)) simPick(sym, x.name, slotRule(x));
   if (S.data && S.data.status) { renderPills(); renderSlots(S.data.status); }
 }
 $('rangeSeg').addEventListener('click', (ev) => {
@@ -762,9 +774,9 @@ function renderCandles() {
 }
 
 // ---------- 전략 시뮬레이션 ----------
-function simPick(symbol, name, strategy) {
+function simPick(symbol, name, rule) {
   const prev = S.simSel;
-  S.simSel = { symbol, name, strategy: strategy || (prev ? prev.strategy : ''), days: prev ? prev.days : 365 };
+  S.simSel = { symbol, name, rule: rule || (prev ? prev.rule : null), days: prev ? prev.days : 365 };
   $('simSearch').value = name;
   refreshSim();
 }
@@ -780,25 +792,26 @@ async function refreshSim(auto) {
   const id = S.simSeq = S.simSeq + 1;
   if (!auto) $('simLine').textContent = '파이가 계산하는 중이에요… (처음 고른 종목은 몇 초 걸려요)';
   try {
-    const r = await getJSON(`/api/stock/simulate?symbol=${q.symbol}&days=${q.days}&strategy=${q.strategy || ''}`);
+    const r = await getJSON(`/api/stock/simulate?symbol=${q.symbol}&days=${q.days}&${q.rule ? ruleQuery(q.rule) : 'strategy='}`);
     if (id !== S.simSeq) return;
     S.sim = r; S.simAt = Date.now();
-    if (r.ready) { q.days = r.days; q.strategy = r.detail.name; }
+    if (r.ready) { q.days = r.days; if (r.detail.name !== 'combo') q.rule = normalizeRule({ strategy: r.detail.name }); }
     if (r.need_data || r.stale) requestRanking(q.symbol);
     renderSim();
   } catch (e) { if (id === S.simSeq) $('simLine').textContent = '계산하지 못했어요. 잠시 뒤 다시 골라 보세요.'; }
 }
 function renderSimControls() {
   const q = S.simSel;
-  const ss = $('simStrategy'); ss.innerHTML = '';
-  for (const r of simReady() ? S.sim.results : S.data.strategies) ss.append(el('option', { value: r.name, text: optionText(r) }));
-  ss.value = q.strategy || ss.options[0].value;
+  // 살 때·팔 때 전략 (이 기간 순위). 고르면 바로 다시 계산
+  const list = simReady() ? S.sim.results.filter(x => !x.combo) : S.data.strategies;
+  if (!q.rule) q.rule = normalizeRule({ strategy: list[0].name });
+  $('simRule').innerHTML = '';
+  $('simRule').append(ruleBuilder(q.rule, () => list.map(r => ({ value: r.name, text: optionText(r) })), () => refreshSim()));
   const ds = $('simDays'); ds.innerHTML = '';
   const periods = S.sim && S.sim.market === q.symbol && S.sim.periods && S.sim.periods.length ? S.sim.periods : S.data.periods.map(p => ({ ...p, ok: true }));
   for (const p of periods) { const o = el('option', { value: p.days, text: `최근 ${p.label}` + (p.ok ? '' : ' (데이터 부족)') }); o.disabled = !p.ok; ds.append(o); }
   ds.value = q.days;
 }
-$('simStrategy').onchange = () => { S.simSel.strategy = $('simStrategy').value; refreshSim(); };
 $('simDays').onchange = () => { S.simSel.days = +$('simDays').value; refreshSim(); };
 function renderSim() {
   renderSimControls();
@@ -830,7 +843,8 @@ function renderSim() {
   tile('그냥 들고 있었다면', won(hfin), pct(hold.total_return * 100, 1), hold.total_return);
   tile('가장 크게 빠졌을 때', pct(res.mdd * 100, 1), '고점 대비 최대 낙폭', res.mdd < 0 ? -1 : 0);
   tile('사고판 횟수', `${res.trades}번`, res.win_rate == null ? '아직 판 적 없음' : `이긴 비율 ${Math.round(res.win_rate * 100)}%`);
-  tile('이 기간 순위', `${res.rank}위`, `전략 ${r.results.length}개 중`);
+  const count = r.results.filter(x => !x.combo).length;
+  tile('이 기간 순위', `${res.rank}위`, res.combo ? `전략 ${count}개 사이에 넣으면` : `전략 ${count}개 중`);
   drawSim();
 }
 function drawSim() {
@@ -899,22 +913,26 @@ function spark(curve) {
 function renderRankTable() {
   const body = $('ranks'); body.innerHTML = '';
   if (!simReady()) { $('rankHead').textContent = '같은 기간 전략 순위'; return; }
-  const r = S.sim, period = r.periods.find(p => p.days === r.days), x = slotOf(r.market);
-  $('rankHead').textContent = `같은 기간(최근 ${period ? period.label : r.days + '일'}) ${r.results.length}개 전략 순위 · ${r.rank_by === 'calmar' ? '위험 대비 수익 순' : '수익률 순'}`;
+  const r = S.sim, period = r.periods.find(p => p.days === r.days), x = slotOf(r.market), using = x ? slotRule(x) : null;
+  const count = r.results.filter(v => !v.combo).length;
+  $('rankHead').textContent = `같은 기간(최근 ${period ? period.label : r.days + '일'}) ${count}개 전략 순위 · ${r.rank_by === 'calmar' ? '위험 대비 수익 순' : '수익률 순'}`;
   for (const v of r.results) {
     const g = strat(v.name), tr = el('tr', { title: fmtGuide(g.guide || '') });
     if (v.name === r.detail.name) tr.className = 'active';
-    cell(tr, v.rank <= 3 ? MEDALS[v.rank - 1] : v.rank + '위', 'left' + (v.rank <= 3 ? ' medal' : ''));
+    const medal = !v.combo && v.rank <= 3;  // 조합 줄은 '이 전략들 사이에 넣으면 몇 위'
+    cell(tr, medal ? MEDALS[v.rank - 1] : v.rank + '위', 'left' + (medal ? ' medal' : ''));
     const nm = cell(tr, v.label, 'left');
+    if (v.combo) nm.prepend(el('span', { class: 'tag combo', text: '조합' }));
     if (g.stock_only) nm.append(el('span', { class: 'tagline', text: '주식 전용' }));
-    if (x && x.strategy.name === v.name) nm.append(el('span', { class: 'tag', text: '사용 중' }));
+    if (using && (v.combo ? sameRule(using, S.simSel.rule) : isSimpleRule(using) && using.strategy === v.name))
+      nm.append(el('span', { class: 'tag', text: '사용 중' }));
     tone(cell(tr, pct(v.total_return * 100, 1)), v.total_return);
     tone(cell(tr, v.cagr == null ? '-' : pct(v.cagr * 100, 1)), v.cagr);
     cell(tr, pct(v.mdd * 100, 1), v.mdd < 0 ? 'down' : '');
     cell(tr, v.win_rate == null ? '-' : Math.round(v.win_rate * 100) + '%');
     cell(tr, v.trades + '회');
     cell(tr, '').appendChild(spark(v.curve));
-    tr.onclick = () => { S.simSel.strategy = v.name; refreshSim(); $('simLine').scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+    if (!v.combo) tr.onclick = () => { S.simSel.rule = normalizeRule({ strategy: v.name }); refreshSim(); $('simLine').scrollIntoView({ block: 'center', behavior: 'smooth' }); };
     body.append(tr);
   }
 }

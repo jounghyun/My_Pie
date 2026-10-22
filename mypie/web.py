@@ -37,6 +37,7 @@ from .config import load_config
 from .db import Database
 from .keys import load_keys, read_env, write_env
 from .strategies import STOCK_STRATEGIES, STRATEGIES, strategy_params
+from .strategies.combo import check_rule, is_simple, make_rule, normalize_rule, rule_fields
 from .timeutil import now_kst, ts
 
 log = logging.getLogger("mypie.web")
@@ -176,7 +177,8 @@ _sim_cache: dict[tuple, list[dict]] = {}
 STOCK_SIM_PERIODS = [(30, "1달"), (90, "3달"), (180, "6달"), (365, "1년"), (1095, "3년")]
 
 
-def build_simulation(db_path: str, cfg: dict, market: str, tf: str, days: int, strategy: str) -> dict:
+def build_simulation(db_path: str, cfg: dict, market: str, tf: str, days: int, strategy: str,
+                     rule: dict | None = None) -> dict:
     """코인 전략 시뮬레이션: 한 종목·판단 주기로 최근 days일 동안 모든 전략을 굴려 본 순위와, 고른 전략의 매매 지점.
     봇이 모아 둔 봉으로 계산한다. 봉이 모자라거나 오래됐으면 need_data / stale로 알려서 봇에게 받아 달라고 하게 한다."""
     if not MARKET_PATTERN.match(market) or tf not in timeframes.TIMEFRAMES:
@@ -186,10 +188,12 @@ def build_simulation(db_path: str, cfg: dict, market: str, tf: str, days: int, s
                      bars_of=lambda d: backtest.period_bars(minutes, d), strategies=STRATEGIES,
                      fee=float(cfg["paper"]["fee_rate"]), sell_cost=0.0, rank_by=cfg["backtest"]["rank_by"],
                      per_year=timeframes.bars_per_year(tf), cfg=cfg,
-                     is_stale=lambda last: timeframes.key_to_utc(last) + timedelta(minutes=minutes * 2) < now_kst())
+                     is_stale=lambda last: timeframes.key_to_utc(last) + timedelta(minutes=minutes * 2) < now_kst(),
+                     rule=rule)
 
 
-def build_stock_simulation(db_path: str, cfg: dict, symbol: str, days: int, strategy: str) -> dict:
+def build_stock_simulation(db_path: str, cfg: dict, symbol: str, days: int, strategy: str,
+                           rule: dict | None = None) -> dict:
     """주식 전략 시뮬레이션 (일봉, 주식용 전략 목록, 증권거래세 반영)."""
     if not STOCK_SYMBOL.match(symbol):
         return {"market": symbol, "tf": "1d", "days": days, "periods": [], "ready": False, "message": "잘못된 종목이에요."}
@@ -197,11 +201,23 @@ def build_stock_simulation(db_path: str, cfg: dict, symbol: str, days: int, stra
     return _simulate(db_path, symbol, "1d", days, strategy, periods=STOCK_SIM_PERIODS,
                      bars_of=lambda d: d * 250 // 365, strategies=STOCK_STRATEGIES, fee=float(sc["fee_rate"]),
                      sell_cost=float(sc["sell_tax"]), rank_by=sc.get("rank_by", "return"), per_year=250, cfg=cfg,
-                     is_stale=lambda last: last < krx.previous_trading_day(now_kst().date()).isoformat())
+                     is_stale=lambda last: last < krx.previous_trading_day(now_kst().date()).isoformat(), rule=rule)
+
+
+def _query_rule(query: dict, registry: dict) -> dict | None:
+    """시뮬레이션 주소의 살 때·팔 때 조합 (?strategy=a&buy=a,b&buy_op=and&sell=a&sell_op=or). 없거나 잘못되면 None."""
+    if "buy" not in query and "sell" not in query:
+        return None
+    first = lambda key: query.get(key, [""])[0]
+    rule, problem = check_rule({"strategy": first("strategy"), "buy": first("buy").split(",") if first("buy") else None,
+                                "buy_op": first("buy_op"), "sell": first("sell").split(",") if first("sell") else None,
+                                "sell_op": first("sell_op")}, registry)
+    return None if problem else rule
 
 
 def _simulate(db_path: str, market: str, tf: str, days: int, strategy: str, *, periods, bars_of, strategies: dict,
-              fee: float, sell_cost: float, rank_by: str, per_year: float, cfg: dict, is_stale) -> dict:
+              fee: float, sell_cost: float, rank_by: str, per_year: float, cfg: dict, is_stale,
+              rule: dict | None = None) -> dict:
     out = {"market": market, "tf": tf, "days": days, "periods": [], "ready": False}
     db = _open(db_path)
     if not db:
@@ -231,13 +247,27 @@ def _simulate(db_path: str, market: str, tf: str, days: int, strategy: str, *, p
             _sim_cache[key] = results
             while len(_sim_cache) > SIM_CACHE_SIZE:
                 _sim_cache.pop(next(iter(_sim_cache)))
+        combo = None
+        if rule and not is_simple(rule):  # 살 때·팔 때 조합: 같은 기간·같은 규칙으로 따로 굴린다
+            ckey = key + (json.dumps(rule, sort_keys=True),)
+            combo = _sim_cache.get(ckey)
+            if combo is None:
+                params = {name: strategy_params(cfg, name) for name in strategies}
+                made = make_rule(rule, lambda n: strategies[n](params.get(n)))
+                warm = min(history, len(candles) - bars)
+                combo = {"name": "combo", "label": made.label,
+                         **backtest.simulate(made, candles[-(bars + warm):], fee, warm, per_year, True, sell_cost)}
+                ranked = sorted([r for r in results] + [combo], key=lambda r: backtest.score(r, rank_by), reverse=True)
+                combo["rank"] = next(i for i, r in enumerate(ranked, 1) if r is combo)
+                _sim_cache[ckey] = combo
     window = candles[-bars:]
-    chosen = next((r for r in results if r["name"] == strategy), results[0])
+    chosen = combo or next((r for r in results if r["name"] == strategy), results[0])
     hold = next((r for r in results if r["name"] == "buy_and_hold"), chosen)
+    shown = ([{**combo, "combo": True}] if combo else []) + results  # 조합은 맨 위에 (순위는 '그 자리라면 몇 위')
     return {
         **out, "ready": True, "rank_by": rank_by,
         "from": window[0]["day"], "to": last, "bars": bars,
-        "results": [{k: v for k, v in r.items() if k not in ("detail", "description", "guide")} for r in results],
+        "results": [{k: v for k, v in r.items() if k not in ("detail", "description", "guide")} for r in shown],
         "detail": {"name": chosen["name"], "keys": [c["day"] for c in window], "close": [c["close"] for c in window],
                    "equity": chosen["detail"]["equity"], "hold": hold["detail"]["equity"],
                    "fills": chosen["detail"]["fills"], "holding": chosen["detail"]["holding"]},
@@ -460,19 +490,21 @@ def request_stock(stock_db: str, main_db: str, data: dict) -> tuple[int, dict]:
     request: dict = {"action": action}
     try:
         if action == "add":
-            symbol, strategy = str(data.get("symbol", "")), str(data.get("strategy", ""))
+            symbol = str(data.get("symbol", ""))
             if not STOCK_SYMBOL.match(symbol):
                 return 400, {"ok": False, "message": "종목을 골라 주세요."}
-            if strategy not in STOCK_STRATEGIES:
+            rule, problem = check_rule(data, STOCK_STRATEGIES)  # 살 때·팔 때 전략
+            if problem:
                 return 400, {"ok": False, "message": "전략을 골라 주세요."}
-            request.update(symbol=symbol, name=str(data.get("name") or symbol)[:40], strategy=strategy,
+            request.update(symbol=symbol, name=str(data.get("name") or symbol)[:40], **rule_fields(rule),
                            amount=max(0.0, float(data.get("amount") or 0)))
         elif action in ("remove", "strategy", "transfer"):
             request["slot"] = str(data.get("slot", ""))[:20]
             if action == "strategy":
-                if str(data.get("strategy")) not in STOCK_STRATEGIES:
+                rule, problem = check_rule(data, STOCK_STRATEGIES)
+                if problem:
                     return 400, {"ok": False, "message": "전략을 골라 주세요."}
-                request["strategy"] = str(data["strategy"])
+                request.update(rule_fields(rule))
             if action == "transfer":
                 direction = "out" if data.get("direction") == "out" else "in"
                 request.update(direction=direction, all=bool(data.get("all")))
@@ -927,8 +959,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlparse(self.path)
         route, query = url.path, parse_qs(url.query)
-        if route == "/app.css":  # 화면 모양만 있는 공용 파일이라 로그인 전에도 준다
-            self._send(200, (STATIC_DIR / "app.css").read_bytes(), "text/css; charset=utf-8")
+        if route in ("/app.css", "/rules.js"):  # 화면 모양·도우미뿐인 공용 파일이라 로그인 전에도 준다
+            kind = "text/css" if route.endswith(".css") else "text/javascript"
+            self._send(200, (STATIC_DIR / route[1:]).read_bytes(), kind + "; charset=utf-8")
             return
         if route == "/healthz":
             self._send(200, b"ok", "text/plain")
@@ -955,7 +988,7 @@ class Handler(BaseHTTPRequestHandler):
                               query.get("tf", ["1d"])[0])),
             "/api/simulate": lambda: build_simulation(self.db_path, self.cfg, query.get("market", ["KRW-BTC"])[0],
                                                       query.get("tf", ["1d"])[0], int(query.get("days", ["0"])[0] or 0),
-                                                      query.get("strategy", [""])[0]),
+                                                      query.get("strategy", [""])[0], _query_rule(query, STRATEGIES)),
             "/api/stats": lambda: build_stats(self.db_path),
             "/api/system": lambda: build_system(self.db_path),
             "/api/stock/status": lambda: build_stock_payload(self.stock_db_path, self.db_path),
@@ -969,7 +1002,8 @@ class Handler(BaseHTTPRequestHandler):
                                     max(20, min(int(query.get("bars", ["120"])[0]), 800)))),
             "/api/stock/simulate": lambda: build_stock_simulation(self.stock_db_path, self.cfg, query.get("symbol", [""])[0],
                                                                   int(query.get("days", ["0"])[0] or 0),
-                                                                  query.get("strategy", [""])[0]),
+                                                                  query.get("strategy", [""])[0],
+                                                                  _query_rule(query, STOCK_STRATEGIES)),
         }
         if route in builders:
             try:

@@ -86,7 +86,7 @@ def simulate(strategy: Strategy, candles: list[dict], fee_rate: float, warmup: i
     return result
 
 
-def _score(result: dict, rank_by: str) -> float:
+def score(result: dict, rank_by: str) -> float:
     if rank_by == "calmar":  # 최대 낙폭 대비 연평균 수익
         return (result["cagr"] or -1) / max(abs(result["mdd"]), 0.01)
     return result["total_return"]
@@ -102,7 +102,7 @@ def rank_strategies(candles: list[dict], fee_rate: float, rank_by: str = "return
         strategy = cls((params or {}).get(name))
         results.append({"name": name, "label": cls.label, "description": cls.description, "guide": cls.guide,
                         **simulate(strategy, candles, fee_rate, warmup, bars_per_year, detail, sell_cost)})
-    results.sort(key=lambda r: _score(r, rank_by), reverse=True)
+    results.sort(key=lambda r: score(r, rank_by), reverse=True)
     for rank, r in enumerate(results, 1):
         r["rank"] = rank
     return results

@@ -250,6 +250,15 @@ class StockBotTest(TempDb):
         bot.step(at(DAY2, "09:03"))
         self.assertEqual(self.slot(bot)["qty"], 3)                       # 전략을 바꿔도 주식은 그대로
         self.assertEqual(self.slot(bot)["strategy"], "ma_cross")
+        self.request(5, action="strategy", slot=sid, strategy="rsi", buy=["rsi", "new_high_52w"], buy_op="or",
+                     sell=["ma_cross"], sell_op="and")                   # 살 때·팔 때 조합 (주식 전용 전략도)
+        bot.step(at(DAY2, "09:04"))
+        s = self.slot(bot)
+        self.assertEqual((s["buy"], s["buy_op"], s["sell"], s["qty"]), (["rsi", "new_high_52w"], "or", ["ma_cross"], 3))
+        self.assertEqual(self.db.get_state("status")["slots"][0]["rule"]["sell"], ["ma_cross"])
+        self.request(6, action="strategy", slot=sid, strategy="ma_cross")  # 하나로 되돌리면 조합 칸은 지운다
+        bot.step(at(DAY2, "09:05"))
+        self.assertNotIn("buy", self.slot(bot))
 
     def test_sell_proceeds_stay_in_the_slot(self):
         prev = [candle("2026-10-21", 90_000, 110_000, 90_000, 100_000)]  # 목표가 = 시가 + 20,000 × 0.5
@@ -426,7 +435,12 @@ class StockWebTest(TempDb):
             self.assertEqual(self.control(action="mode", mode="live", confirm_live=True)[0], 200)
         with mock.patch("mypie.toss.load_credentials", return_value=None):
             self.assertEqual(self.control(action="mode", mode="live", confirm_live=True)[0], 400)  # 키 없음
-        self.assertEqual(len(self.db.states("request:")), 3)
+        self.assertEqual(self.control(action="strategy", slot="k1", strategy="rsi", sell=["nope"])[0], 400)
+        self.assertEqual(self.control(action="strategy", slot="k1", strategy="rsi", buy=["rsi", "disparity"], buy_op="or",
+                                      sell=["ma_cross"])[0], 200)
+        queued = [r for _, r in self.db.states("request:") if r["action"] == "strategy"][0]
+        self.assertEqual((queued["buy"], queued["buy_op"], queued["sell"]), (["rsi", "disparity"], "or", ["ma_cross"]))
+        self.assertEqual(len(self.db.states("request:")), 4)
 
     def test_intraday_chart_groups_minute_bars_of_the_latest_day(self):
         class FakeClient:
@@ -497,6 +511,10 @@ class StockWebTest(TempDb):
         self.assertEqual((sim["detail"]["name"], len(sim["detail"]["close"])), ("disparity", 365 * 250 // 365))
         self.assertTrue(sim["stale"])                                    # 마지막 일봉이 오래전
         self.assertEqual(len(sim["results"]), len(STOCK_STRATEGIES))
+        rule = web._query_rule({"strategy": ["disparity"], "buy": ["disparity,new_high_52w"], "sell": ["ma_cross"]}, STOCK_STRATEGIES)
+        sim = web.build_stock_simulation(self.stock_path, cfg, "005930", 365, "disparity", rule)
+        self.assertEqual((sim["detail"]["name"], len(sim["results"])), ("combo", len(STOCK_STRATEGIES) + 1))
+        self.assertTrue(sim["results"][0]["combo"])
         self.assertTrue(web.build_stock_simulation(self.stock_path, cfg, "000660", 90, "")["need_data"])
 
 

@@ -11,6 +11,7 @@
 
 from .buyhold import add_flow
 from .db import Database
+from .strategies.combo import normalize_rule, rule_fields
 
 FLOW_THRESHOLD = 100  # 이보다 작은 장부·실제 잔고 차이는 반올림 오차로 본다 (원)
 
@@ -49,17 +50,22 @@ class VaultBook:
 
     # ---- 종목 계좌 만들기·지우기·이체 ----
 
-    def add_slot(self, sid: str, symbol: str, name: str, strategy: str) -> dict:
+    def add_slot(self, sid: str, symbol: str, name: str, rule) -> dict:
+        """rule: 전략 이름 하나, 또는 살 때·팔 때 규칙 (strategies/combo.py)."""
         if any(s["symbol"] == symbol for s in self.data["slots"].values()):
             raise VaultError("이미 그 종목 계좌가 있어요")
-        s = self.data["slots"][sid] = {"symbol": symbol, "name": name, "strategy": strategy, "cash": 0.0, "qty": 0,
+        s = self.data["slots"][sid] = {"symbol": symbol, "name": name, "cash": 0.0, "qty": 0,
                                        "cost": 0.0, "avg_price": 0.0, "contrib": 0.0, "hold": 0.0, "hold_cash": 0.0}
-        self.save()
+        self.set_rule(sid, rule)
         return s
 
-    def set_strategy(self, sid: str, strategy: str) -> None:
-        """전략만 바꾼다. 들고 있는 주식은 그대로 두고 새 전략이 판단한다."""
-        self.slot(sid)["strategy"] = strategy
+    def set_rule(self, sid: str, rule) -> None:
+        """전략(살 때·팔 때)만 바꾼다. 들고 있는 주식은 그대로 두고 새 전략이 판단한다."""
+        rule = normalize_rule({"strategy": rule} if isinstance(rule, str) else rule)
+        s = self.slot(sid)
+        for key in ("buy", "buy_op", "sell", "sell_op"):
+            s.pop(key, None)
+        s.update(rule_fields(rule))
         self.save()
 
     def remove_slot(self, sid: str) -> float:
