@@ -1266,26 +1266,32 @@ class WebLoginTest(TempDbTest):
 
 
 class SshWatchTest(unittest.TestCase):
-    def test_alerts_outside_logins_and_batches_failures(self):
-        sent, now = [], [0.0]
-        watch = sshwatch.SshWatch(sent.append, clock=lambda: now[0])
-        day = "2026-10-22"
-        watch.handle("Accepted publickey for jounghyun from 192.168.100.195 port 4933 ssh2: ED25519 SHA256:x", day)
+    def test_alerts_outside_logins_and_sums_up_failures_twice_a_day(self):
+        sent, now = [], [datetime(2026, 10, 22, 9, 0, tzinfo=KST)]
+        watch = sshwatch.SshWatch(sent.append, now=lambda: now[0])
+        watch.handle("Accepted publickey for jounghyun from 192.168.100.195 port 4933 ssh2: ED25519 SHA256:x")
         self.assertEqual(sent, [])                                       # 집 안 PC 로그인은 조용히
-        watch.handle("Accepted password for jounghyun from 45.67.89.10 port 5000 ssh2", day)
+        watch.handle("Accepted password for jounghyun from 45.67.89.10 port 5000 ssh2")
         self.assertIn("45.67.89.10", sent[-1])                           # 집 밖 로그인은 바로
         self.assertIn("비밀번호", sent[-1])
-        for _ in range(3):
-            watch.handle("Failed password for invalid user admin from 91.200.12.34 port 40000 ssh2", day)
-        watch.handle("Invalid user test from 91.200.12.34 port 40001", day)
-        self.assertEqual(len(sent), 2)                                   # 같은 IP 실패는 하루 한 번만 바로
+        for port in (40000, 40001, 40002):
+            watch.handle(f"Invalid user admin from 91.200.12.34 port {port}")
+            watch.handle(f"Failed password for invalid user admin from 91.200.12.34 port {port} ssh2")  # 같은 접속은 한 번
+        watch.handle("Failed password for root from 192.168.100.7 port 5001 ssh2")
+        self.assertEqual(len(sent), 1)                                   # 실패는 바로 알리지 않는다
+        self.assertFalse(watch.summarize())                              # 아직 오전
+        now[0] = datetime(2026, 10, 22, 12, 0, 5, tzinfo=KST)
+        self.assertTrue(watch.summarize())                               # 낮 12시: 오전치를 한 번에
+        self.assertIn("10/22 00:00~12:00 · 총 4번", sent[-1])
+        self.assertIn("91.200.12.34 3번 (admin)", sent[-1])
+        self.assertIn("192.168.100.7 (집 안) 1번 (root)", sent[-1])
+        now[0] = datetime(2026, 10, 23, 0, 0, 5, tzinfo=KST)
         watch.summarize()
-        self.assertEqual(len(sent), 2)                                   # 1시간이 안 됐으면 아직
-        now[0] = 3600
-        watch.summarize()
-        self.assertIn("3번 더", sent[-1])                                # 그 뒤 실패 3번을 모아서
-        watch.handle("Failed password for invalid user admin from 91.200.12.34 port 40002 ssh2", "2026-10-23")
-        self.assertEqual(len(sent), 4)                                   # 다음 날이면 다시 바로 알림
+        self.assertEqual(len(sent), 2)                                   # 실패가 없던 반나절은 안 보낸다
+        late = datetime(2026, 10, 22, 23, 50, tzinfo=KST)                # 밤 12시 전 기록을 늦게 읽어도 그 반나절로
+        watch.handle("Failed password for pi from 45.67.89.10 port 6000 ssh2", late)
+        self.assertTrue(watch.summarize())
+        self.assertIn("10/22 12:00~24:00 · 총 1번", sent[-1])
 
 
 if __name__ == "__main__":
