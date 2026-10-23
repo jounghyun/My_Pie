@@ -1167,6 +1167,11 @@ class TelegramSetupTest(TempDbTest):
 
 
 class ReportTest(TempDbTest):
+    def test_reboot_command_needs_confirmation(self):
+        from mypie.reports import reboot_step
+        self.assertEqual([reboot_step(t) for t in ("/재부팅", "/reboot", "/reboot@my_bot", "재부팅 확인", "/reboot yes", "/상태", "")],
+                         ["ask", "ask", "ask", "do", "do", None, None])
+
     STATUS = {"mode": "paper", "updated_at": "2026-10-21 09:00:05",
               "account": {"equity": 1_012_345, "return_pct": 1.23, "contributions": 1_000_000, "vault": 0},
               "slots": [{"market": "KRW-BTC", "tf_label": "일봉", "book": {"krw": 0}, "holding": True, "price": 110_000_000,

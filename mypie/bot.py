@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import signal
+import subprocess
 import threading
 import time
 from dataclasses import asdict
@@ -242,9 +243,30 @@ class Bot:
                 if str(message.get("chat", {}).get("id")) != str(chat):
                     continue
                 try:
-                    telegram.send(reports.command_reply(message.get("text", ""), db, self.cfg["stock"]["db_path"]), creds)
+                    step = reports.reboot_step(message.get("text", ""))
+                    if step == "do":
+                        telegram.send("🔄 재부팅해요. 1~2분 뒤 봇이 다시 시작하면 알려드려요.", creds)
+                        self.event("info", "텔레그램 명령으로 라즈베리파이를 재부팅해요")
+                        self._reboot(creds)
+                        continue
+                    telegram.send(reports.REBOOT_ASK if step == "ask"
+                                  else reports.command_reply(message.get("text", ""), db, self.cfg["stock"]["db_path"]), creds)
                 except telegram.TelegramError as e:
                     log.warning("텔레그램 답장 실패: %s", e)
+
+    def _reboot(self, creds) -> None:
+        """파이를 다시 켠다. 비밀번호 없이 되는 방법을 차례로 시도하고, 다 안 되면 텔레그램으로 알린다."""
+        for cmd in (["sudo", "-n", "/sbin/reboot"], ["systemctl", "reboot"]):
+            try:
+                if subprocess.run(cmd, capture_output=True, timeout=20).returncode == 0:
+                    return
+            except (OSError, subprocess.SubprocessError):
+                continue
+        try:
+            telegram.send("⚠️ 재부팅하지 못했어요 (권한이 없어요). 파이에서 한 번만 이렇게 해 주세요:\n"
+                          'echo "$USER ALL=(root) NOPASSWD: /sbin/reboot" | sudo tee /etc/sudoers.d/mypie-reboot', creds)
+        except telegram.TelegramError:
+            pass
 
     def _sstate(self, slot: Slot) -> dict:
         return (self.db.get_state("slot_state") or {}).get(slot.id, {})

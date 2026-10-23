@@ -241,7 +241,7 @@ class StockBot:
             self._write_status(now, sess)
             return sess
         self._recover()
-        self._refresh_quotes(sess)
+        self._refresh_quotes(sess, now)
         self._sync(sess)  # 실거래면 금고를 실제 현금에 먼저 맞춘 뒤에 이체 요청을 처리한다
         self._handle_requests(today)
         if sess == "open" and self._market_open_today(now, today):
@@ -264,7 +264,7 @@ class StockBot:
             self.last_snapshot = time.monotonic()
         return sess
 
-    def _refresh_quotes(self, sess: str) -> None:
+    def _refresh_quotes(self, sess: str, now: datetime | None = None) -> None:
         symbols = sorted({s.symbol for s in self.slots})
         if not symbols:
             return
@@ -275,7 +275,7 @@ class StockBot:
         self.quotes.update(self._call(self.client.quotes, symbols))
         self.prices.update({sym: q["price"] for sym, q in self.quotes.items() if q.get("price")})
         self.last_quotes = time.monotonic()
-        previous = krx.previous_trading_day(now_kst().date(), self.holidays).isoformat()
+        previous = krx.previous_trading_day((now or now_kst()).date(), self.holidays).isoformat()
         for sym in symbols:  # 등락률은 전날 정규장 종가 기준 (NXT 애프터마켓 20:00 종가 말고)
             last = self.db.candle_history(sym, 1, REGULAR_TF)
             if sym in self.quotes and last and last[0]["day"] == previous:

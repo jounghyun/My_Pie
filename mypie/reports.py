@@ -8,12 +8,14 @@ HELP = ("🥧 My_Pie 명령어\n"
         "/상태 (/status) — 지금 포트폴리오와 총 자산\n"
         "/기록 (/trades) — 최근 매매 기록 10건\n"
         "/주식 (/stock) — 주식 금고와 종목 계좌\n"
+        "/재부팅 (/reboot) — 라즈베리파이 재부팅 (뒤에 '확인'을 붙여야 해요)\n"
         "/도움 (/help) — 이 안내")
 
 COMMANDS = {  # 텔레그램 메뉴에 보일 영어 명령 (한글 명령도 똑같이 알아듣는다)
     "status": "지금 포트폴리오와 총 자산",
     "trades": "최근 매매 기록 10건",
     "stock": "주식 금고와 종목 계좌",
+    "reboot": "라즈베리파이 재부팅 (뒤에 '확인')",
     "help": "명령어 안내",
 }
 
@@ -71,6 +73,18 @@ def daily_text(trades: list[dict], status: dict | None) -> str:
     if len(trades) > 15:
         body.insert(0, f"(앞의 {len(trades) - 15}건 생략)")
     return "\n".join(head + body) + "\n\n" + status_text(status)
+
+
+def reboot_step(text: str) -> str | None:
+    """재부팅 명령인지: 'ask'(확인 안내만) | 'do'(확인까지 붙음) | None(다른 말). 실수로 눌러도 안 꺼지게 '확인'을 요구한다."""
+    parts = (text or "").strip().split()
+    if not parts or parts[0].split("@")[0].lstrip("/").lower() not in ("재부팅", "reboot"):
+        return None
+    return "do" if len(parts) > 1 and parts[1] in ("확인", "confirm", "yes") else "ask"
+
+
+REBOOT_ASK = ("🔄 라즈베리파이를 재부팅할까요? 정말 하려면 아래처럼 보내세요.\n/재부팅 확인\n"
+              "(1~2분 동안 매매·웹페이지가 멈췄다가 자동으로 다시 시작해요)")
 
 
 def command_reply(text: str, db: Database, stock_db: str | None = None) -> str | None:
